@@ -4,45 +4,45 @@ import chisel3.util.{Counter, Mux1H, MuxCase, OHToUInt, PriorityMux, ShiftRegist
 
 object BinaryDesigns {
 
+  // finds the leading zero count of an input n-bit number
   class LZC_enc(n: Int) extends Module {
     val io = IO(new Bundle{
       val in_r = Input(UInt(n.W))
       val out_e = Output(UInt((log2Ceil(n)+1).W))
     })
     override def desiredName = s"LZC_enc${n}"
-    val rounds = Math.pow(2,n).toInt
-    val swmap = Array.fill(rounds)(0)
-    swmap(0) = n
-    var prev = 0
-    for(i <- 0 until n) {
-      for(j <- 0 until Math.pow(2, i).toInt) {
-        swmap(prev + j + 1) = n - (i+1)
-      }
-      prev += Math.pow(2, i).toInt
-    }
-    val seq = (0 until rounds).map(i=>(io.in_r === i.U(n.W), swmap(i).U((log2Ceil(n)+1).W)))
+    val mux_cond = (0 until n).map(i=>(io.in_r(n-1-i).asBool, i.U((log2Ceil(n)+1).W)))
     val out_enc = Wire(UInt((log2Ceil(n)+1).W))
-    out_enc := MuxCase(0.U,seq)
+    out_enc := MuxCase(n.U((log2Ceil(n)+1).W),mux_cond)
     io.out_e := out_enc
   }
 
+  // Leading Zero Counter top module
+  // bw is the bits per input num, and N is the radix for LZC decomposition
   class LZC(bw: Int, N: Int) extends Module{
     val io = IO(new Bundle (){
       val in_d = Input(UInt(bw.W))
       val out_c = Output(UInt((log2Ceil(bw) + 1).W))
     })
     override def desiredName = s"LZC${bw}_${N}"
+    // the bw-bit num is divided into bw/N groups with N bits each, for which an LZC encoder will count leading zeros
+    // for each group. The idea is to take the results from each LZC encoder and then merge the results in a binary tree
+    // fashion such that we obtain a final LZC result for the entire bw-bit number
     val encoders = (0 until bw / N).map(i=>Module(new LZC_enc(N)).io)
     val encoded = (0 until bw / N).map(i=>{
+      // this portion extracts the bit groups from the corresponding ranges of the bw-bit input num
       val enc_in = io.in_d(N*(i+1) - 1,N*i)
       encoders(i).in_r := enc_in
-      encoders(i).out_e
+      encoders(i).out_e // output from LZC encoder is directly mapped to this array
     }).reverse
+    // assembling the binary tree for reduction of LZC encoder results
+    // given bw/N number of groups, there will be log2(bw/N) stages to the binary tree
     val stages = log2Ceil(bw/N)
-    val init_width = log2Ceil(N)+1
+    val init_width = log2Ceil(N)+1 // this is the width of the LZC enc output
+    //instantiating the merger modules for each stage of the binary tree
     val mergers = (0 until stages).map(i=>{
       val range = Math.pow(2, stages - (i+1)).toInt
-      (0 until range).map(j=>{Module(new LZC_Merge(init_width+i)).io})
+      (0 until range).map(j=>{Module(new LZC_Merge(init_width+i)).io}) // the + i term is attributed to the expanding output width from each merger module at each stage
     })
     for(i <- 0 until stages){
       val range = Math.pow(2, stages - (i+1)).toInt
@@ -59,6 +59,7 @@ object BinaryDesigns {
     io.out_c := mergers(stages-1)(0).out_m
   }
 
+  // merges two leading zero count results, assuming in_h and in_l are msb and lsb respectively
   class LZC_Merge(bw:Int) extends Module{
     val io = IO(new Bundle(){
       val in_h = Input(UInt(bw.W))
@@ -68,9 +69,9 @@ object BinaryDesigns {
     override def desiredName = s"LZC_Merge${bw}"
     val result_h = Wire(Vec(2,Bool()))
     val result_l = Wire(UInt((bw-1).W))
-    result_h(1) := io.in_h(bw-1) & io.in_l(bw-1)
-    result_h(0) := Mux(io.in_h(bw-1).asBool, !io.in_l(bw-1), io.in_h(bw-1))
-    result_l := Mux(io.in_h(bw-1).asBool, io.in_l(bw-2,0), io.in_h(bw-2,0))
+    result_h(1) := io.in_h(bw-1) & io.in_l(bw-1) // if msb of both in_h and in_l is high, it is implied that both counted the max number of zeros from their respective numbers. Therefore, the total count of zeros is the sum between in_l and in_h, and will require an extra bit due to carry
+    result_h(0) := Mux(io.in_h(bw-1).asBool, !io.in_l(bw-1), io.in_h(bw-1)) // if zero count from in_h is maximized (that is all bits are 0s in high bits), then we have to sum the zero count from in_l (lower bits), otherwise the in_l will be insignificant to the merged zero count
+    result_l := Mux(io.in_h(bw-1).asBool, io.in_l(bw-2,0), io.in_h(bw-2,0)) // the same logic is applied in this line as the above line
     io.out_m := result_h.asUInt ## result_l
   }
 

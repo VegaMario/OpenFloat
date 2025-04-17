@@ -1,239 +1,112 @@
 package FP_Modules
 
-import scala.collection.mutable
-
 object FormatConvert {
   // FP conversion IEEE 754
   def convert_IEEE754_to_Decimal(num: BigInt, bw: Int): BigDecimal = {
-    var exponent = 0
-    var mantissa = 0
-    var zero_1 = BigInt(0)
-    if (bw == 16) {
-      exponent = 5
-      mantissa = 10
-      zero_1 = BigInt("8000", 16)
-    } else if (bw == 32) {
-      exponent = 8
-      mantissa = 23
-      zero_1 = BigInt("80000000", 16)
-    } else if (bw == 64) {
-      exponent = 11
-      mantissa = 52
-      zero_1 = BigInt("8000000000000000", 16)
-    } else if (bw == 128) {
-      exponent = 15
-      mantissa = 112
-      zero_1 = BigInt("80000000000000000000000000000000", 16)
+    val (exponent, mantissa, zero_1) = bw match {
+      case 16 => (5,10,BigInt("8000", 16))
+      case 32 => (8,23,BigInt("80000000", 16))
+      case 64 => (11,52,BigInt("8000000000000000", 16))
+      case 128 => (15,112,BigInt("80000000000000000000000000000000", 16))
     }
-    if (num == zero_1) {
-      return BigDecimal(0)
-    }
+
     var n = num
-    var list = mutable.ArrayBuffer[String]()
-    while (n != 0) {
-      list += (n % 2).toString
+    val list = (0 until bw).map(i=>{
+      val t = (n % 2).toString
       n = n / 2
-    }
-    while (list.length < bw) {
-      list += 0.toString
-    }
-    val sign = list.toList(bw - 1)
-    val exp = list.slice(mantissa, bw - 1).reduce(_ + _)
-    var sum = binary_string_to_Double(exp, bw)
-    var mant = list.slice(0, mantissa).reduce(_ + _).reverse
-    var new_mant = binary_string_to_Double_Frac(mant, bw)
-    new_mant = new_mant * BigDecimal(2).pow((sum - (Math.pow(2, exponent - 1) - 1)).toInt) //Math.pow(2, (sum-(Math.pow(2, exponent - 1) - 1)).toDouble)
-    if (sign.toInt == 1)
-      new_mant = new_mant * -1
-    if (BigInt(num.toString().slice(0, bw - 1)) == 0)
-      scala.BigDecimal(0.0)
+      t
+    })
+
+    val sign_string = list.toList(bw - 1)
+    val exp_string = list.slice(mantissa, bw - 1).reduce(_ + _) // concat all exp bits into a string
+    val exp_double = binary_string_to_Double(exp_string) // converts the exp string into a BigDecimal
+    val mant_string = list.slice(0, mantissa).reduce(_ + _).reverse
+    var mant_double = binary_string_to_Double_Frac(mant_string) // converts the mantissa string into a BigDecimal
+    mant_double = mant_double * BigDecimal(2).pow((exp_double - (Math.pow(2, exponent - 1) - 1)).toInt) //Math.pow(2, (sum-(Math.pow(2, exponent - 1) - 1)).toDouble)
+    if (sign_string.equals("1"))
+      mant_double = mant_double * -1
+    if (num == zero_1 || num  == BigInt(0)) // if num is zero/negative zero
+      BigDecimal(0)
     else
-      new_mant
+      mant_double
   }
 
-  def binary_string_to_Double(str: String, bw: Int): BigDecimal = {
-    var sum: BigDecimal = 0.0
-    for (i <- 0 until str.length) {
-      if (str(i).equals('1')) {
-        sum += scala.BigDecimal(2).pow(i)
-      }
-    }
-    sum
+  def binary_string_to_Double(str: String): BigDecimal = {
+    (0 until str.length).map(i => {
+      if (str(i).equals('1'))
+        BigDecimal(2).pow(i)
+      else
+        BigDecimal(0.0)
+    }).sum
   }
 
-  def binary_string_to_Double_Frac(str: String, bw: Int): BigDecimal = {
-    var sum: BigDecimal = 0.0
-    for (i <- 1 to str.length) {
-      if (str(i - 1).equals('1')) {
-        sum += scala.BigDecimal(2).pow(-1 * i)
-      }
-    }
-    sum + 1.0
+  def binary_string_to_Double_Frac(str: String): BigDecimal = {
+    (1 to str.length).map(i=>{
+      if (str(i - 1).equals('1'))
+        BigDecimal(2).pow(-1 * i)
+      else
+        BigDecimal(0.0)
+    }).sum + 1.0
   }
 
   def convert_string_to_IEEE_754(str: String, bw: Int): BigInt = {
-    var exponent = 0
-    var mantissa = 0
-    var bias = 0
-    if (bw == 16) {
-      exponent = 5
-      mantissa = 10
-      bias = 15
-    } else if (bw == 32) {
-      exponent = 8
-      mantissa = 23
-      bias = 127
-    } else if (bw == 64) {
-      exponent = 11
-      mantissa = 52
-      bias = 1023
-    } else if (bw == 128) {
-      exponent = 15
-      mantissa = 112
-      bias = 16383
+    val (exponent, mantissa, bias) = bw match {
+      case 16 => (5,10,15)
+      case 32 => (8,23,127)
+      case 64 => (11,52,1023)
+      case 128 =>(15,112,16383)
     }
+
     val max_val = (BigDecimal(2) - BigDecimal(2).pow(-1 * mantissa)) * BigDecimal(2).pow(bias)
     val min_val = BigDecimal(2).pow(-1 * (bias - 1))
-    if (str.equals("0.0") || str.equals('0')) {
-      return scala.BigInt(0)
-    }
-    var sign = '0'
-    var num = str
-    if (str(0).equals('-')) {
-      sign = '1'
-      num = str.slice(1, str.length)
-    }
-    if (num.contains('E')) {
-      num = convert_E(num)
-    }
-    var new_val = BigDecimal(num)
-    if (new_val.abs > max_val) {
-      if (new_val < 0)
-        new_val = -1 * max_val
-      else
-        new_val = max_val
-    } else if (new_val.abs < min_val) {
-      if (new_val < 0)
-        new_val = -1 * min_val
-      else
-        new_val = min_val
-    }
-    if (new_val.toString().contains('E')) {
-      num = convert_E(new_val.toString())
-    } else {
-      num = new_val.toString()
-    }
-    var part = num.split('.')
-    var whole = scala.BigInt(part(0))
-    var frac = scala.BigDecimal(("0." + part(1)))
-    var list1 = mutable.ArrayBuffer[String]()
-    while (whole != 0) {
-      list1 += (whole % 2).toString
-      whole = whole / 2
-    }
-    var whole_str = ""
-    if (list1.isEmpty) {
-      whole_str = "0"
-    } else {
-      whole_str = list1.reverse.reduce(_ + _)
+
+    val (num, sign) = BigDecimal(str) match {
+      case x if (x.abs > max_val) => (max_val, x.sign)
+      case x if (x.abs < min_val && x.abs != 0) => (min_val, x.sign)
+      case x if true => (x.abs, x.sign)
     }
 
-    var new_exp = (whole_str.length - 1 + Math.pow(2, exponent - 1) - 1).toInt
-    var list2 = mutable.ArrayBuffer[String]()
-    for (i <- 0 until mantissa) {
+    val (w_BigInt, f_BigDec) = (num.toBigInt, num - BigDecimal(num.toBigInt))
+    val whole = w_BigInt
+    var frac = f_BigDec
+
+    val whole_str = whole.toString(2)
+    val base_exp = (whole_str.length - 1 + bias)
+
+    val frac_str = (0 until mantissa).map(i=>{
       frac = frac * 2
-      if (frac >= 1.0) {
-        list2 += 1.toString
-        frac = frac - 1.0
-      } else {
-        list2 += 0.toString
-      }
-    }
-    var frac_str = list2.reduce(_ + _)
-    var exp_adj = 0
-    var offset = 0
-    var slicefrac = ""
-    var fullstr = whole_str + frac_str
-    if (BigInt(fullstr) == BigInt(0)) {
-      while (frac < 1.0) {
-        frac = frac * 2
-        offset += 1
-      }
-      frac -= 1
-      exp_adj = mantissa + offset
-      list2 = mutable.ArrayBuffer[String]()
-      for (i <- 0 until mantissa) {
-        frac = frac * 2
-        if (frac >= 1.0) {
-          list2 += 1.toString
-          frac = frac - 1.0
-        } else {
-          list2 += 0.toString
-        }
-      }
-      slicefrac = list2.reduce(_ + _)
-    } else {
-      var i = -1
-      do {
-        i += 1
-        if (fullstr(i) == '0') {
-          exp_adj += 1
-        } else {
-          slicefrac = fullstr.slice(i + 1, fullstr.length)
-        }
-      } while (fullstr(i) != '1')
+      val msb = frac.toBigInt
+      frac = frac - BigDecimal(msb)
+      msb.toString()
+    }).reduce(_+_)
 
-      while (slicefrac.length < mantissa) {
-        slicefrac += '0'
-      }
-    }
-    new_exp -= exp_adj
-    var list5 = mutable.ArrayBuffer[String]()
-    while (new_exp != 0) {
-      list5 += (new_exp % 2).toString
-      new_exp /= 2
-    }
-    while (list5.length < exponent) {
-      list5 += "0"
-    }
-    var final_exp = list5.reverse.reduce(_ + _)
-    var final_str = sign + final_exp + slicefrac.slice(0, mantissa)
-    (binary_string_to_Double(final_str.reverse, bw)).toBigInt
+    val full_str = whole_str + frac_str
 
+    val ms_one = (full_str).indexWhere(_ == '1')
+
+    val (new_sign, new_exp, new_frac) =
+      if(ms_one == -1)
+        ("0", Seq.fill(exponent)("0").reduce(_+_), Seq.fill(mantissa)("0").reduce(_+_))
+      else {
+        val f_temp = full_str.slice(ms_one+1,full_str.length) + Seq.fill(mantissa)("0").reduce(_+_)
+        var exp_temp = base_exp - ms_one
+        val exp_temp_string = (0 until exponent).map(i => {
+          val t =  (exp_temp % 2).toString
+          exp_temp = exp_temp / 2
+          t
+        }).reverse.reduce(_+_)
+        val sign_temp = if(sign < 0 ) "1" else "0"
+        (sign_temp, exp_temp_string, f_temp.slice(0, mantissa))
+      }
+
+    BigInt(new_sign + new_exp + new_frac, 2)
   }
 
-  def convert_E(x: String): String = {
-    var split = x.split('E')
-    var whole_frac = split(0).split('.')
-    var full_num = split(0).split('.').reduce(_ + _)
-    var num = ""
-    if (split(1).toInt < 0) {
-      full_num = full_num.reverse
-      for (i <- 0 until split(1).toInt.abs.toInt - 1) {
-        full_num += '0'
-      }
-      full_num += ".0"
-      full_num = full_num.reverse
-      num = full_num
-    } else if (split(1).toInt > 0) {
-      var new_frac = ""
-      for (i <- 0 until split(1).toInt) {
-        if (i < whole_frac(1).length) {
-          new_frac += whole_frac(1)(i)
-        } else {
-          new_frac += '0'
-        }
-      }
-      new_frac += '.'
-      if (whole_frac(1).length > split(1).toInt) {
-        for (i <- split(1).toInt until whole_frac(1).length) {
-          new_frac += whole_frac(1)(i)
-        }
-      } else {
-        new_frac += '0'
-      }
-      num = whole_frac(0) ++ new_frac
-    }
-    return num
+
+  def test(args: Array[String]): Unit = {
+    val test_str_to_IEEE = convert_string_to_IEEE_754(BigDecimal("12.1234E2").bigDecimal.toPlainString,32)
+    val test_IEEE_to_Dec = convert_IEEE754_to_Decimal(test_str_to_IEEE, 32)
+    println(s"${test_str_to_IEEE.toString(16)}")
+    println(s"${test_IEEE_to_Dec}")
   }
 }
