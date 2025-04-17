@@ -11,6 +11,7 @@ import FP_Modules.FormatConvert._
 import Binary_Modules.BinaryDesigns._
 
 import java.io.PrintWriter
+import java.math.MathContext
 import scala.util.Random
 object GetVerilog {
   def genDouble(min: Double, max: Double): Double = {
@@ -31,6 +32,58 @@ object GetVerilog {
         c.io.in_b.poke(convert_string_to_IEEE_754("41.6", 32))
         c.clock.step(7)
         println(s"output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
+  }
+
+  class SQRT_TEST extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "DUT"
+    it should "do something" in {
+      val runs = 1E6.toInt
+
+      val inputs = Array.fill(runs)(BigDecimal(genDouble(0,1)))
+      val expected_outputs = inputs.map(_.bigDecimal.sqrt(MathContext.DECIMAL32)).toArray
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val observed_output = Array.fill(runs)(BigDecimal(0))
+
+      var cnt_out = 0
+      var clk = 0
+
+      test(new FP_sqrt(32, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+        c.clock.setTimeout(0)
+        c.io.in_en.poke(true.B)
+        c.io.in_valid.poke(true.B)
+        for(i <- 0 until runs){
+          c.io.in_a.poke(hardware_inputs(i))
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+
+        c.io.in_valid.poke(false.B)
+
+        while(cnt_out < runs){
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+
+        val error = expected_outputs.zip(observed_output).map(x=>{
+          ((x._2 - x._1).abs / x._1) * 100
+        })
+
+        val max_err = error.max
+        val avg_err = error.sum / error.length
+        println(s"AVG Error: ${avg_err}%")
+        println(s"Largest Error: ${max_err}%")
+
+
       }
     }
   }

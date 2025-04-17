@@ -123,14 +123,9 @@ object FPUnits {
     val exp = io.in_a(bw-2, mantissa) -& bias
     val frac = 1.U(2.W) ## io.in_a(mantissa - 1, 0)
 
-    //    printf(p"sign: ${sign}\n")
-    //    printf(p"exp: ${exp}\n")
-    //    printf(p"frac: ${frac}\n")
+    val exp_new = Mux(exp(0).asBool,(exp - 1.U) >> 1, exp >> 1).asUInt
 
-    val ref_exp = Mux(exp(exponent).asBool,((~exp(exponent-1,0)).asUInt + 1.U), exp(exponent-1,0))
-    val exp_new = Mux(ref_exp(0).asBool,(ref_exp - 1.U) >> 1, ref_exp >> 1).asUInt
-
-    val ref_frac = Mux(ref_exp(0).asBool, frac << 1, frac).asUInt
+    val ref_frac = Mux(exp(0).asBool, frac << 1, frac).asUInt
 
     val fsqrt = Module(new frac_sqrt(mantissa,L)).io
     fsqrt.in_en := io.in_en
