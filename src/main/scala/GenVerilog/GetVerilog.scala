@@ -1,19 +1,15 @@
 package GenVerilog
-import chisel3._
-import chiseltest._
-import org.scalatest.flatspec.AnyFlatSpec
-import chiseltest.WriteVcdAnnotation
-import chiseltest.VerilatorBackendAnnotation
-import chisel3.stage.ChiselGeneratorAnnotation
-import circt.stage.{ChiselStage, FirtoolOption}
 import FP_Modules.FPUnits._
 import FP_Modules.FormatConvert._
-import Binary_Modules.BinaryDesigns._
+import chisel3._
+import chisel3.stage.ChiselGeneratorAnnotation
+import chiseltest.{VerilatorBackendAnnotation, WriteVcdAnnotation, _}
+import circt.stage.{ChiselStage, FirtoolOption}
+import org.scalatest.flatspec.AnyFlatSpec
 
-import java.io.PrintWriter
 import java.math.MathContext
 import scala.util.Random
-object GetVerilog {
+object GetVerilog extends App {
   def genDouble(min: Double, max: Double): Double = {
     val random = new Random()
     val randomDoubleInRange = min + (max - min) * random.nextDouble()
@@ -88,21 +84,55 @@ object GetVerilog {
     }
   }
 
+  if(args.length % 2 != 0 || args.length == 0)
+    sys.exit(1)
 
-  def main(args:Array[String]): Unit = {
-    // execute test
-    val t = new BasicTest()
-    t.execute()
+  val sorted_args = (0 until args.length / 2).map(i=>{
+    (args(i*2),args(i*2+1))
+  })
 
-    // generate verilog
+  val (flags, vals) = (sorted_args.map(_._1).toArray, sorted_args.map(_._2).toArray)
+
+  if(flags.contains("-n")){
+    val idx = flags.indexWhere(_.equals("-n"))
+    val n = vals(idx).toLowerCase()
+
+    val dinst = n match {
+      case x if x.equals("fp_add") || x.equals("fp_mult") =>
+        if(!(flags.contains("-d") && flags.contains("-w")))
+          sys.exit(1)
+        val (d, w) = (vals(flags.indexWhere(_.equals("-d"))).toInt, vals(flags.indexWhere(_.equals("-w"))).toInt)
+        x match {
+          case "fp_add" => ChiselGeneratorAnnotation(() => new FP_add(w, d))
+          case "fp_mult" => ChiselGeneratorAnnotation(() => new FP_mult(w, d))
+        }
+
+      case x if x.equals("fp_div") || x.equals("fp_sqrt") =>
+        if(!(flags.contains("-l") && flags.contains("-w")))
+          sys.exit(1)
+        val (l, w) = (vals(flags.indexWhere(_.equals("-l"))).toInt, vals(flags.indexWhere(_.equals("-w"))).toInt)
+        x match {
+          case "fp_div" => ChiselGeneratorAnnotation(() => new FP_div(w, l))
+          case "fp_sqrt" => ChiselGeneratorAnnotation(() => new FP_sqrt(w, l))
+        }
+
+      case x if true =>
+        sys.exit(1)
+        ChiselGeneratorAnnotation(() => new FP_add(32, 7))
+    }
+
     (new ChiselStage).execute(
       Array("--target", "systemverilog"),
-      Seq(ChiselGeneratorAnnotation(() => new FP_add(32,7))
+      Seq(dinst
         ,
         FirtoolOption("--disable-all-randomization"),
-        FirtoolOption("-strip-debug-info")
+        FirtoolOption("-strip-debug-info"),
+        FirtoolOption("--disable-annotation-unknown")
       ),
     )
 
+  } else if(flags.contains("-t")){
+    val t = new SQRT_TEST()
+    t.execute()
   }
 }

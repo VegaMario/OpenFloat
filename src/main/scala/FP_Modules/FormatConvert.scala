@@ -103,7 +103,7 @@ object FormatConvert {
   }
 
 
-  def test(args: Array[String]): Unit = {
+  def usage_example(): Unit = {
     val test_str_to_IEEE = convert_string_to_IEEE_754(BigDecimal("12.1234E2").bigDecimal.toPlainString,32)
     val test_IEEE_to_Dec = convert_IEEE754_to_Decimal(test_str_to_IEEE, 32)
     println(s"${test_str_to_IEEE.toString(16)}")
