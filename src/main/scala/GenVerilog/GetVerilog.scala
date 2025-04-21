@@ -1,0 +1,138 @@
+package GenVerilog
+import FP_Modules.FPUnits._
+import FP_Modules.FormatConvert._
+import chisel3._
+import chisel3.stage.ChiselGeneratorAnnotation
+import chiseltest.{VerilatorBackendAnnotation, WriteVcdAnnotation, _}
+import circt.stage.{ChiselStage, FirtoolOption}
+import org.scalatest.flatspec.AnyFlatSpec
+
+import java.math.MathContext
+import scala.util.Random
+object GetVerilog extends App {
+  def genDouble(min: Double, max: Double): Double = {
+    val random = new Random()
+    val randomDoubleInRange = min + (max - min) * random.nextDouble()
+    randomDoubleInRange
+  }
+
+  class BasicTest extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "DUT"
+    it should "do something" in {
+      // simple test to see output of multiplier module
+      // since vcd is enabled, look for a test_run_dir directory to be created, it will have vcd files when run
+      test(new FP_add(32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteVcdAnnotation)) {c=>
+        c.io.in_en.poke(true.B)
+        c.io.in_valid.poke(true.B)
+        c.io.in_a.poke(convert_string_to_IEEE_754("12.2", 32))
+        c.io.in_b.poke(convert_string_to_IEEE_754("41.6", 32))
+        c.clock.step(7)
+        println(s"output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
+  }
+
+  class SQRT_TEST extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "DUT"
+    it should "do something" in {
+      val runs = 1E6.toInt
+
+      val inputs = Array.fill(runs)(BigDecimal(genDouble(0,1)))
+      val expected_outputs = inputs.map(_.bigDecimal.sqrt(MathContext.DECIMAL32)).toArray
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val observed_output = Array.fill(runs)(BigDecimal(0))
+
+      var cnt_out = 0
+      var clk = 0
+
+      test(new FP_sqrt(32, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+        c.clock.setTimeout(0)
+        c.io.in_en.poke(true.B)
+        c.io.in_valid.poke(true.B)
+        for(i <- 0 until runs){
+          c.io.in_a.poke(hardware_inputs(i))
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+
+        c.io.in_valid.poke(false.B)
+
+        while(cnt_out < runs){
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+
+        val error = expected_outputs.zip(observed_output).map(x=>{
+          ((x._2 - x._1).abs / x._1) * 100
+        })
+
+        val max_err = error.max
+        val avg_err = error.sum / error.length
+        println(s"AVG Error: ${avg_err}%")
+        println(s"Largest Error: ${max_err}%")
+
+
+      }
+    }
+  }
+
+  if(args.length % 2 != 0 || args.length == 0)
+    sys.exit(1)
+
+  val sorted_args = (0 until args.length / 2).map(i=>{
+    (args(i*2),args(i*2+1))
+  })
+
+  val (flags, vals) = (sorted_args.map(_._1).toArray, sorted_args.map(_._2).toArray)
+
+  if(flags.contains("-n")){
+    val idx = flags.indexWhere(_.equals("-n"))
+    val n = vals(idx).toLowerCase()
+
+    val dinst = n match {
+      case x if x.equals("fp_add") || x.equals("fp_mult") =>
+        if(!(flags.contains("-d") && flags.contains("-w")))
+          sys.exit(1)
+        val (d, w) = (vals(flags.indexWhere(_.equals("-d"))).toInt, vals(flags.indexWhere(_.equals("-w"))).toInt)
+        x match {
+          case "fp_add" => ChiselGeneratorAnnotation(() => new FP_add(w, d))
+          case "fp_mult" => ChiselGeneratorAnnotation(() => new FP_mult(w, d))
+        }
+
+      case x if x.equals("fp_div") || x.equals("fp_sqrt") =>
+        if(!(flags.contains("-l") && flags.contains("-w")))
+          sys.exit(1)
+        val (l, w) = (vals(flags.indexWhere(_.equals("-l"))).toInt, vals(flags.indexWhere(_.equals("-w"))).toInt)
+        x match {
+          case "fp_div" => ChiselGeneratorAnnotation(() => new FP_div(w, l))
+          case "fp_sqrt" => ChiselGeneratorAnnotation(() => new FP_sqrt(w, l))
+        }
+
+      case x if true =>
+        sys.exit(1)
+        ChiselGeneratorAnnotation(() => new FP_add(32, 7))
+    }
+
+    (new ChiselStage).execute(
+      Array("--target", "systemverilog"),
+      Seq(dinst
+        ,
+        FirtoolOption("--disable-all-randomization"),
+        FirtoolOption("-strip-debug-info"),
+        FirtoolOption("--disable-annotation-unknown")
+      ),
+    )
+
+  } else if(flags.contains("-t")){
+    val t = new SQRT_TEST()
+    t.execute()
+  }
+}

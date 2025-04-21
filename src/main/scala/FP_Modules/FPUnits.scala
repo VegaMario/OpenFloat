@@ -152,7 +152,7 @@ object FPUnits {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_mult_${bw}_${pd}_v2"
+    override def desiredName = s"FP_mult_${bw}_${pd}"
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
