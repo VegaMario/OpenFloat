@@ -1,13 +1,10 @@
-package FP_Modules
-import Binary_Modules.BinaryDesigns._
-import FormatConvert._
+package FloatingPoint
+import Primitives.primitives._
+import Primitives.convert._
 import chisel3._
 import chisel3.util.{Counter, ShiftRegister, log2Ceil}
 
-import java.io.PrintWriter
-import scala.collection.mutable
-
-object FPUnits {
+object fpu {
 
   // Digit recurrence based division
   class FP_div(bw: Int, L: Int) extends Module {
