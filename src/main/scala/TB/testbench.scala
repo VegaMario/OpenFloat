@@ -22,8 +22,8 @@ object testbench extends App {
     behavior of "BasicTest"
     it should "do something" in {
       // simple test to see output of multiplier module
-      // since vcd is enabled, look for a test_run_dir directory to be created, it will have vcd files when run
-      test(new FP_add(32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteVcdAnnotation)) {c=>
+      // since fst is enabled, look for a test_run_dir directory to be created, it will have fst files when run
+      test(new FP_add(32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.io.in_en.poke(true.B)
         c.io.in_valid.poke(true.B)
         c.io.in_a.poke(convert_string_to_IEEE_754("12.2", 32))

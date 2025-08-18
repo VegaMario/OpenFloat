@@ -31,7 +31,7 @@ object convert {
       mant_double
   }
 
-  def binary_string_to_Double(str: String): BigDecimal = {
+  private def binary_string_to_Double(str: String): BigDecimal = {
     (0 until str.length).map(i => {
       if (str(i).equals('1'))
         BigDecimal(2).pow(i)
@@ -40,7 +40,7 @@ object convert {
     }).sum
   }
 
-  def binary_string_to_Double_Frac(str: String): BigDecimal = {
+  private def binary_string_to_Double_Frac(str: String): BigDecimal = {
     (1 to str.length).map(i=>{
       if (str(i - 1).equals('1'))
         BigDecimal(2).pow(-1 * i)
@@ -103,7 +103,7 @@ object convert {
   }
 
 
-  def usage_example(): Unit = {
+  private def usage_example(): Unit = {
     val test_str_to_IEEE = convert_string_to_IEEE_754(BigDecimal("12.1234E2").bigDecimal.toPlainString,32)
     val test_IEEE_to_Dec = convert_IEEE754_to_Decimal(test_str_to_IEEE, 32)
     println(s"${test_str_to_IEEE.toString(16)}")
