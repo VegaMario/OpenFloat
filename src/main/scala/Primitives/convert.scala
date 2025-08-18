@@ -1,6 +1,6 @@
-package FP_Modules
+package Primitives
 
-object FormatConvert {
+object convert {
   // FP conversion IEEE 754
   def convert_IEEE754_to_Decimal(num: BigInt, bw: Int): BigDecimal = {
     val (exponent, mantissa, zero_1) = bw match {

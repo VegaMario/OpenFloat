@@ -1,8 +1,8 @@
-package Binary_Modules
+package Primitives
 import chisel3._
-import chisel3.util.{Counter, Mux1H, MuxCase, OHToUInt, PriorityMux, ShiftRegister, is, log2Ceil, log2Floor, switch}
+import chisel3.util.{Mux1H, MuxCase, OHToUInt, ShiftRegister, is, log2Ceil, switch}
 
-object BinaryDesigns {
+object primitives {
 
   // finds the leading zero count of an input n-bit number
   class LZC_enc(n: Int) extends Module {
