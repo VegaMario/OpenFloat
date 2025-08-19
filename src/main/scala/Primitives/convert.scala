@@ -3,60 +3,35 @@ package Primitives
 object convert {
   // FP conversion IEEE 754
   def convert_IEEE754_to_Decimal(num: BigInt, bw: Int): BigDecimal = {
-    val (exponent, mantissa, zero_1) = bw match {
-      case 16 => (5,10,BigInt("8000", 16))
-      case 32 => (8,23,BigInt("80000000", 16))
-      case 64 => (11,52,BigInt("8000000000000000", 16))
-      case 128 => (15,112,BigInt("80000000000000000000000000000000", 16))
+    val (exponent, mantissa) = bw match {
+      case 16 => (5,10)
+      case 32 => (8,23)
+      case 64 => (11,52)
+      case 128 => (15,112)
     }
+    if (num == BigInt(1) << (bw-1) || num  == BigInt(0))
+      return BigDecimal(num)
 
-    var n = num
-    val list = (0 until bw).map(i=>{
-      val t = (n % 2).toString
-      n = n / 2
-      t
-    })
+    val bias = BigDecimal(2).pow(exponent - 1) - 1
+    val list = num.bigInteger.toString(2).reverse.padTo(bw, '0')
 
-    val sign_string = list.toList(bw - 1)
-    val exp_string = list.slice(mantissa, bw - 1).reduce(_ + _) // concat all exp bits into a string
-    val exp_double = binary_string_to_Double(exp_string) // converts the exp string into a BigDecimal
-    val mant_string = list.slice(0, mantissa).reduce(_ + _).reverse
-    var mant_double = binary_string_to_Double_Frac(mant_string) // converts the mantissa string into a BigDecimal
-    mant_double = mant_double * BigDecimal(2).pow((exp_double - (Math.pow(2, exponent - 1) - 1)).toInt) //Math.pow(2, (sum-(Math.pow(2, exponent - 1) - 1)).toDouble)
-    if (sign_string.equals("1"))
-      mant_double = mant_double * -1
-    if (num == zero_1 || num  == BigInt(0)) // if num is zero/negative zero
-      BigDecimal(0)
-    else
-      mant_double
-  }
-
-  private def binary_string_to_Double(str: String): BigDecimal = {
-    (0 until str.length).map(i => {
-      if (str(i).equals('1'))
-        BigDecimal(2).pow(i)
-      else
-        BigDecimal(0.0)
-    }).sum
-  }
-
-  private def binary_string_to_Double_Frac(str: String): BigDecimal = {
-    (1 to str.length).map(i=>{
-      if (str(i - 1).equals('1'))
-        BigDecimal(2).pow(-1 * i)
-      else
-        BigDecimal(0.0)
-    }).sum + 1.0
+    val sign = BigDecimal(-1).pow(list(bw-1).toInt)
+    val exp_string = list.slice(mantissa, bw - 1)
+    val exp_double = BigDecimal(BigInt(exp_string.reverse, 2))
+    val mant_string = "1" + list.slice(0, mantissa).reverse
+    var mant_double = BigDecimal(BigInt(mant_string, 2)) * BigDecimal(2).pow(-mantissa)
+    mant_double = mant_double * BigDecimal(2).pow((exp_double - bias).toInt) * sign
+    mant_double
   }
 
   def convert_string_to_IEEE_754(str: String, bw: Int): BigInt = {
-    val (exponent, mantissa, bias) = bw match {
-      case 16 => (5,10,15)
-      case 32 => (8,23,127)
-      case 64 => (11,52,1023)
-      case 128 =>(15,112,16383)
+    val (exponent, mantissa) = bw match {
+      case 16 => (5,10)
+      case 32 => (8,23)
+      case 64 => (11,52)
+      case 128 =>(15,112)
     }
-
+    val bias = (BigDecimal(2).pow(exponent - 1) - 1).toInt
     val max_val = (BigDecimal(2) - BigDecimal(2).pow(-1 * mantissa)) * BigDecimal(2).pow(bias)
     val min_val = BigDecimal(2).pow(-1 * (bias - 1))
 
