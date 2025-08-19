@@ -20,5 +20,5 @@ object generate extends App {
   }
 
   // generate verilog
-  genVerilog(new FP_div(32, 12))
+  genVerilog(new FP_div(32, 12, 7))
 }

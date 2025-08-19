@@ -125,7 +125,7 @@ object primitives {
       val out_r = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"divider_BW$bw"
+    override def desiredName = s"divider_BW${bw}_${latency}"
     val pipe_skip = if (latency >= L) 1 else  L / latency
     val pipe_map = Array.fill(L)(0)
     for(i <- 0 until latency){
@@ -179,56 +179,70 @@ object primitives {
       }
     }
   }
-
   // Sqrt specialized for 1.fractional numbers (really useful for floating point normalized numbers)
-  class frac_sqrt(bw: Int, L: Int) extends Module{
+  class frac_sqrt(bw: Int, L: Int, latency: Int) extends Module{
     val io = IO(new Bundle(){
-      val in_en = Input(Bool())
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
       val in_a = Input(UInt((bw+2).W))
       val in_valid = Input(Bool())
       val out_valid = Output(Bool())
       val out_s = Output(UInt(bw.W))
     })
-    val P = RegInit(VecInit.fill(L-1)(0.U((bw*2+1).W)))
-    val X = RegInit(VecInit.fill(L-1)(0.U((bw*2+2).W)))
+    override def desiredName = s"frac_sqrt_BW${bw}_${latency}"
+    val pipe_skip = if (latency >= L) 1 else  L / latency
+    val pipe_map = Array.fill(L)(0)
+    for(i <- 0 until latency){
+      pipe_map((i*pipe_skip) % L) += 1
+    }
+
+    val P_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+1).W)))
+    val X_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+2).W)))
+    val result_wires = WireDefault(VecInit.fill(L)(0.U(bw.W)))
+    val ovalid_wires = Wire(Vec(L, Bool()))
+
+    val P_pipeline = P_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val X_pipeline = X_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+
+    ovalid_wires(0) := io.in_valid
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
+
     val one = 1.U(1.W) ## 0.U((bw*2).W)
-    val temp_res = Wire(Vec(L,UInt(bw.W)))
-    val results = RegInit(VecInit.fill(L)(0.U(bw.W)))
     val shifted_sqrd_ones = Wire(Vec(L, UInt((bw*2+1).W)))
     shifted_sqrd_ones.zipWithIndex.foreach(x=> x._1 := (one >> ((x._2 + 1)*2)))
     val shifted_ones = Wire(Vec(L, UInt((bw*2+1).W)))
     shifted_ones.zipWithIndex.foreach(x=> x._1 := (one >> (x._2 + 1)))
     val shifted_ps = Wire(Vec(L-1, UInt((bw*2+1).W)))
-    shifted_ps.zipWithIndex.foreach(x=>x._1 := (P(x._2) >> (x._2+1)))
-    temp_res(0) := 0.U
-    temp_res.slice(1,L).zip(results.slice(0,L-1)).foreach(x=>x._1 := x._2)
-    io.out_valid := ShiftRegister(io.in_valid,L,io.in_en)
-    io.out_s := results.last
+    shifted_ps.zipWithIndex.foreach(x=>x._1 := (P_pipeline(x._2).bits >> (x._2+1)))
+    io.out_valid := result_pipeline.last.valid
+    io.out_s := result_pipeline.last.bits
     val in = (io.in_a ## 0.U(bw.W)) - one
+    io.in_ready := io.out_ready
     //    printf(p"results: ${results}\n")
-    when(io.in_en){
+    when(io.out_ready){
       for(i <- 0 until L){
         if(i == 0){
           val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
           val y = shifted_one +& one
           val yleqx = y <= in
-          P(0) := Mux(yleqx, shifted_ones(i) + one, one)
-          X(0) := Mux(yleqx, in - y, in)
-          val t = VecInit(temp_res(0).asBools)
+          P_wires(0) := Mux(yleqx, shifted_ones(i) + one, one)
+          X_wires(0) := Mux(yleqx, in - y, in)
+          val t = VecInit(0.U(bw.W).asBools)
           t(bw-1) := yleqx
-          results(0) := t.asUInt
+          result_wires(0) := t.asUInt
         }else{
           val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
           val shifted_P = shifted_ps(i-1)
           val y = shifted_P +& shifted_one
-          val yleqx = y <= X(i-1)
+          val yleqx = y <= X_pipeline(i-1).bits
           if(i != L - 1) {
-            P(i) := Mux(yleqx, shifted_ones(i) + P(i-1), P(i-1))
-            X(i) := Mux(yleqx, X(i-1) - y, X(i-1))
+            P_wires(i) := Mux(yleqx, shifted_ones(i) + P_pipeline(i-1).bits, P_pipeline(i-1).bits)
+            X_wires(i) := Mux(yleqx, X_pipeline(i-1).bits - y, X_pipeline(i-1).bits)
           }
-          val t = VecInit(temp_res(i).asBools)
+          val t = VecInit(result_pipeline(i-1).bits.asBools)
           t(bw-1 - i):= yleqx
-          results(i) := t.asUInt
+          result_wires(i) := t.asUInt
         }
       }
     }
