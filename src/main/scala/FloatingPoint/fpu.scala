@@ -7,7 +7,7 @@ import chisel3.util.{Counter, ShiftRegister, log2Ceil}
 object fpu {
 
   // Digit recurrence based division
-  class FP_div(bw: Int, L: Int) extends Module {
+  class FP_div(bw: Int, L: Int, latency: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
       val in_en = Input(Bool())
@@ -70,9 +70,8 @@ object fpu {
     postProcess_exp_subtractor.io.in_b := exp_wire(1) - bias // the second input
     postProcess_exp_subtractor.io.in_c := 0.U
 
-    val frac_divider = Module(new divider((mantissa + 2), L, true)).io
+    val frac_divider = Module(new divider((mantissa + 2), L, latency, true)).io
     frac_divider.in_ready := io.in_en
-    frac_divider.in_reset := false.B
     frac_divider.in_valid := io.in_valid
     frac_divider.in_a := whole_frac_wire(0) ## (0.U((1).W))
     frac_divider.in_b := whole_frac_wire(1) ## (0.U((1).W))
@@ -624,7 +623,7 @@ object fpu {
     })
     override def desiredName = s"FP_cos_${bw}_$iters"
     val TWOPI = convert_string_to_IEEE_754((Math.PI * 2 ).toString, bw).U(bw.W)
-    val fpdiv = Module(new FP_div(bw,15)).io
+    val fpdiv = Module(new FP_div(bw,15,15)).io
     fpdiv.in_en := io.in_en
     fpdiv.in_valid := io.in_valid
     fpdiv.in_a := io.in_angle
