@@ -1,44 +1,43 @@
 package Primitives
 import chisel3._
-import chisel3.util.{Mux1H, MuxCase, OHToUInt, ShiftRegister, is, log2Ceil, switch}
+import chisel3.util.{Mux1H, MuxCase, OHToUInt, Pipe, ShiftRegister, is, log2Ceil, switch}
 
 object primitives {
 
-  // finds the leading zero count of an input n-bit number
-  class LZC_enc(n: Int) extends Module {
+  // finds the leading zero count of an input radix-bit number
+  class LZC_enc(radix: Int) extends Module {
     val io = IO(new Bundle{
-      val in_r = Input(UInt(n.W))
-      val out_e = Output(UInt((log2Ceil(n)+1).W))
+      val in_r = Input(UInt(radix.W))
+      val out_e = Output(UInt((log2Ceil(radix)+1).W))
     })
-    override def desiredName = s"LZC_enc${n}"
-    val mux_cond = (0 until n).map(i=>(io.in_r(n-1-i).asBool, i.U((log2Ceil(n)+1).W)))
-    val out_enc = Wire(UInt((log2Ceil(n)+1).W))
-    out_enc := MuxCase(n.U((log2Ceil(n)+1).W),mux_cond)
+    override def desiredName = s"LZC_enc${radix}"
+    val mux_cond = (0 until radix).map(i=>(io.in_r(radix-1-i).asBool, i.U((log2Ceil(radix)+1).W)))
+    val out_enc = Wire(UInt((log2Ceil(radix)+1).W))
+    out_enc := MuxCase(radix.U((log2Ceil(radix)+1).W),mux_cond)
     io.out_e := out_enc
   }
 
   // Leading Zero Counter top module
-  // bw is the bits per input num, and N is the radix for LZC decomposition
-  class LZC(bw: Int, N: Int) extends Module{
+  // bw is the bits per input num, and radix for LZC decomposition
+  class LZC(bw: Int, radix: Int) extends Module{
     val io = IO(new Bundle (){
       val in_d = Input(UInt(bw.W))
       val out_c = Output(UInt((log2Ceil(bw) + 1).W))
     })
-    override def desiredName = s"LZC${bw}_${N}"
-    // the bw-bit num is divided into bw/N groups with N bits each, for which an LZC encoder will count leading zeros
-    // for each group. The idea is to take the results from each LZC encoder and then merge the results in a binary tree
-    // fashion such that we obtain a final LZC result for the entire bw-bit number
-    val encoders = (0 until bw / N).map(i=>Module(new LZC_enc(N)).io)
-    val encoded = (0 until bw / N).map(i=>{
+    override def desiredName = s"LZC${bw}_${radix}"
+    // the bw-bit num is divided into bw/radix groups with radix bits each. For each an LZC encoder will count leading zeros.
+    // The idea is to take results from LZC encoder and then merge the results in a binary tree fashion
+    val encoders = (0 until bw / radix).map(i=>Module(new LZC_enc(radix)).io)
+    val encoded = (0 until bw / radix).map(i=>{
       // this portion extracts the bit groups from the corresponding ranges of the bw-bit input num
-      val enc_in = io.in_d(N*(i+1) - 1,N*i)
+      val enc_in = io.in_d(radix*(i+1) - 1,radix*i)
       encoders(i).in_r := enc_in
       encoders(i).out_e // output from LZC encoder is directly mapped to this array
     }).reverse
     // assembling the binary tree for reduction of LZC encoder results
-    // given bw/N number of groups, there will be log2(bw/N) stages to the binary tree
-    val stages = log2Ceil(bw/N)
-    val init_width = log2Ceil(N)+1 // this is the width of the LZC enc output
+    // given bw/radix number of groups, there will be log2(bw/radix) stages to the binary tree
+    val stages = log2Ceil(bw/radix)
+    val init_width = log2Ceil(radix)+1 // this is the first stage width of the LZC enc output (width grows as results merge)
     //instantiating the merger modules for each stage of the binary tree
     val mergers = (0 until stages).map(i=>{
       val range = Math.pow(2, stages - (i+1)).toInt
@@ -69,9 +68,9 @@ object primitives {
     override def desiredName = s"LZC_Merge${bw}"
     val result_h = Wire(Vec(2,Bool()))
     val result_l = Wire(UInt((bw-1).W))
-    result_h(1) := io.in_h(bw-1) & io.in_l(bw-1) // if msb of both in_h and in_l is high, it is implied that both counted the max number of zeros from their respective numbers. Therefore, the total count of zeros is the sum between in_l and in_h, and will require an extra bit due to carry
-    result_h(0) := Mux(io.in_h(bw-1).asBool, !io.in_l(bw-1), io.in_h(bw-1)) // if zero count from in_h is maximized (that is all bits are 0s in high bits), then we have to sum the zero count from in_l (lower bits), otherwise the in_l will be insignificant to the merged zero count
-    result_l := Mux(io.in_h(bw-1).asBool, io.in_l(bw-2,0), io.in_h(bw-2,0)) // the same logic is applied in this line as the above line
+    result_h(1) := io.in_h(bw-1) & io.in_l(bw-1) // if msb of both in_h and in_l are asserted, both count the max number of zeros. The total count of zeros is the sum between in_l and in_h. Equivalently, assert the bw+1 bit if true.
+    result_h(0) := Mux(io.in_h(bw-1).asBool, !io.in_l(bw-1), io.in_h(bw-1)) // if zero count from in_h is maximized (counted all zeros), we have to check the in_l bits.
+    result_l := Mux(io.in_h(bw-1).asBool, io.in_l(bw-2,0), io.in_h(bw-2,0))
     io.out_m := result_h.asUInt ## result_l
   }
 
@@ -114,12 +113,12 @@ object primitives {
     io.out_s := result
   }
 
-  class divider(bw: Int, L: Int, frac: Boolean) extends Module{
+  class divider(bw: Int, L: Int, latency: Int, frac: Boolean) extends Module{
     require(L <= bw)
     val io = IO(new Bundle(){
-      val in_ready = Input(Bool())
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
       val in_valid = Input(Bool())
-      val in_reset = Input(Bool())
       val in_a = Input(UInt(bw.W))
       val in_b = Input(UInt(bw.W))
       val out_s = Output(UInt(bw.W))
@@ -127,55 +126,55 @@ object primitives {
       val out_valid = Output(Bool())
     })
     override def desiredName = s"divider_BW$bw"
-    //cc latency equal to bw
-    val a_aux_reg = RegInit(VecInit.fill(L)(0.U((bw*2).W)))
-    val b_aux_reg = RegInit(VecInit.fill(L)(0.U((bw*2).W)))
-    val init_res = Wire(UInt(bw.W))
-    init_res := 0.U
-    val wire_res = Wire(Vec(L,UInt(bw.W)))
-    val result_reg = RegInit(VecInit.fill(L)(0.U(bw.W)))
-    val sr_out_valid = RegInit(VecInit.fill(L)(false.B))
-    wire_res := result_reg
-    io.out_valid := sr_out_valid.last
-    io.out_s := result_reg.last.asUInt
-    io.out_r  := a_aux_reg.last
+    val pipe_skip = if (latency >= L) 1 else  L / latency
+    val pipe_map = Array.fill(L)(0)
+    for(i <- 0 until latency){
+      pipe_map((i*pipe_skip) % L) += 1
+    }
+
+    val a_aux_wires = WireDefault(VecInit.fill(L)(0.U((bw*2).W)))
+    val b_aux_wires = WireDefault(VecInit.fill(L)(0.U((bw*2).W)))
+    val result_wires = WireDefault(VecInit.fill(L)(0.U(bw.W)))
+    val ovalid_wires = Wire(Vec(L, Bool()))
+
+    val a_aux_pipeline = a_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
+    val b_aux_pipeline = b_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
+    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
+
+    ovalid_wires(0) := io.in_valid
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
+    io.out_valid := result_pipeline.last.valid
+    io.out_s := result_pipeline.last.bits
+    io.out_r  := a_aux_pipeline.last.bits
+    io.in_ready := io.out_ready
     val ina = if (frac) io.in_a ## 0.U(bw.W) else 0.U(bw.W) ## io.in_a
     val inb = if (frac) io.in_b ## 0.U(bw.W) else 0.U(bw.W) ## io.in_b
-    when(io.in_ready){
-      when(io.in_reset){
-        a_aux_reg := VecInit.fill(L)(0.U((bw*2).W))
-        b_aux_reg := VecInit.fill(L)(0.U((bw*2).W))
-        result_reg := VecInit.fill(L)(0.U(bw.W))
-        sr_out_valid := VecInit.fill(L)(false.B)
-      }.otherwise {
-        sr_out_valid(0) := io.in_valid
-        for (i <- 0 until L) {
-          if (i == 0) {
-            val t = VecInit(init_res.asBools)
-            val shifted_b = if (frac) inb else (inb << (bw-1)).asUInt
-            when(ina >= shifted_b) {
-              a_aux_reg(0) := ina - shifted_b
-              t(bw - 1) := 1.U
-            }.otherwise {
-              a_aux_reg(0) := ina
-              t(bw - 1) := 0.U
-            }
-            result_reg(0) := t.asUInt
-            b_aux_reg(0) := shifted_b
-          } else {
-            sr_out_valid(i) := sr_out_valid(i-1)
-            val shifted_b = (b_aux_reg(i - 1) >> 1).asUInt
-            val t = VecInit(wire_res(i - 1).asBools)
-            when(a_aux_reg(i - 1) >= shifted_b) {
-              a_aux_reg(i) := a_aux_reg(i - 1) - shifted_b
-              t(bw - 1 - i) := 1.U
-            }.otherwise {
-              a_aux_reg(i) := a_aux_reg(i - 1)
-              t(bw - 1 - i) := 0.U
-            }
-            result_reg(i) := t.asUInt
-            b_aux_reg(i) := shifted_b
+    when(io.out_ready){
+      for (i <- 0 until L) {
+        if (i == 0) {
+          val t = VecInit(0.U(bw.W).asBools)
+          val shifted_b = if (frac) inb else (inb << (bw-1)).asUInt
+          when(ina >= shifted_b) {
+            a_aux_wires(0) := ina - shifted_b
+            t(bw - 1) := 1.U
+          }.otherwise {
+            a_aux_wires(0) := ina
+            t(bw - 1) := 0.U
           }
+          result_wires(0) := t.asUInt
+          b_aux_wires(0) := shifted_b
+        } else {
+          val shifted_b = (b_aux_pipeline(i - 1).bits >> 1).asUInt
+          val t = VecInit(result_pipeline(i - 1).bits.asBools)
+          when(a_aux_pipeline(i - 1).bits >= shifted_b) {
+            a_aux_wires(i) := a_aux_pipeline(i - 1).bits - shifted_b
+            t(bw - 1 - i) := 1.U
+          }.otherwise {
+            a_aux_wires(i) := a_aux_pipeline(i - 1).bits
+            t(bw - 1 - i) := 0.U
+          }
+          result_wires(i) := t.asUInt
+          b_aux_wires(i) := shifted_b
         }
       }
     }
