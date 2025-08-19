@@ -17,7 +17,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_divider_${bw}_${L}"
+    override def desiredName = s"FP_divider_${bw}_${L}_${latency}"
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
@@ -71,17 +71,17 @@ object fpu {
     postProcess_exp_subtractor.io.in_c := 0.U
 
     val frac_divider = Module(new divider((mantissa + 2), L, latency, true)).io
-    frac_divider.in_ready := io.in_en
+    frac_divider.out_ready := io.in_en
     frac_divider.in_valid := io.in_valid
     frac_divider.in_a := whole_frac_wire(0) ## (0.U((1).W))
     frac_divider.in_b := whole_frac_wire(1) ## (0.U((1).W))
 
-    val uo_check = ShiftRegister(exp_wire(1) < bias, L, io.in_en) //  if yes means we add to exp(0) else we do regular subtraction
-    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, L, io.in_en) // if(y0check) then lookout for cflag low implies overflow, else cflag high implies underflow
+    val uo_check = ShiftRegister(exp_wire(1) < bias, latency, io.in_en) //  if yes means we add to exp(0) else we do regular subtraction
+    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, latency, io.in_en) // if(y0check) then lookout for cflag low implies overflow, else cflag high implies underflow
     val msb_check = frac_divider.out_s((mantissa + 1))
-    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, L, io.in_en)
+    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, latency, io.in_en)
 
-    val new_sign_reg = ShiftRegister(new_sign_wire,L,io.in_en)
+    val new_sign_reg = ShiftRegister(new_sign_wire,latency,io.in_en)
 
 
     val o_flag_reg = Mux(uo_check,!carry_flag || ((exp_sum -& (!msb_check).asUInt) > max_exp), false.B) // if true, overflow detected
@@ -97,7 +97,7 @@ object fpu {
   }
 
   // digit recurrence based fp square root
-  class FP_sqrt(bw: Int, L: Int) extends Module {
+  class FP_sqrt(bw: Int, L: Int, latency: Int) extends Module {
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
@@ -112,7 +112,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_sqrt_${bw}_$L"
+    override def desiredName = s"FP_sqrt_${bw}_${L}_${latency}"
 
     val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
     val sign = io.in_a(bw - 1)
@@ -123,13 +123,13 @@ object fpu {
 
     val ref_frac = Mux(exp(0).asBool, frac << 1, frac).asUInt
 
-    val fsqrt = Module(new frac_sqrt(mantissa,L)).io
-    fsqrt.in_en := io.in_en
+    val fsqrt = Module(new frac_sqrt(mantissa,L, latency)).io
+    fsqrt.out_ready := io.in_en
     fsqrt.in_valid := io.in_valid
     fsqrt.in_a := ref_frac
 
-    val out_sign = ShiftRegister(sign, L, io.in_en)
-    val out_exp = ShiftRegister(exp_new, L, io.in_en) + bias
+    val out_sign = ShiftRegister(sign, latency, io.in_en)
+    val out_exp = ShiftRegister(exp_new, latency, io.in_en) + bias
     val out_frac = fsqrt.out_s
 
     io.out_valid := fsqrt.out_valid
