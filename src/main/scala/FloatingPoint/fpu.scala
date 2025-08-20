@@ -642,7 +642,7 @@ object fpu {
     floatfixed.in_en := io.in_en
     floatfixed.in_valid := fpmult.out_valid
     floatfixed.in_float := fpmult.out_s
-    val cordic = Module(new cordic(bw, false, mantissa, iters)).io
+    val cordic = Module(new cordic(bw, false, mantissa, iters, iters)).io
     cordic.in_en := io.in_en
     cordic.in_valid := floatfixed.out_valid
     cordic.in_d := floatfixed.out_fixed
@@ -678,7 +678,7 @@ object fpu {
     floatfixed.in_en := io.in_en
     floatfixed.in_valid := io.in_valid
     floatfixed.in_float := io.in_tan
-    val cordic = Module(new cordic(bw, true, bw/2, iters)).io
+    val cordic = Module(new cordic(bw, true, bw/2, iters, iters)).io
     cordic.in_en := io.in_en
     cordic.in_valid := floatfixed.out_valid
     cordic.in_d := floatfixed.out_fixed

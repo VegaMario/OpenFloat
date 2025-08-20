@@ -179,6 +179,7 @@ object primitives {
       }
     }
   }
+
   // Sqrt specialized for 1.fractional numbers (really useful for floating point normalized numbers)
   class frac_sqrt(bw: Int, L: Int, latency: Int) extends Module{
     val io = IO(new Bundle(){
@@ -260,7 +261,7 @@ object primitives {
   // - use in rotation mode (v = false) for out_x = cos(in_d) & out_y = sin(in_d)
   // - use in vectoring mode (v = true) for out_z = atan(in_d)
 
-  class cordic(bw: Int, v: Boolean, fbits: Int, n: Int) extends Module{
+  class cordic(bw: Int, v: Boolean, fbits: Int, n: Int, latency: Int) extends Module{
     val io = IO(new Bundle{
       val in_en = Input(Bool())
       val in_valid = Input(Bool())
@@ -278,15 +279,26 @@ object primitives {
     private val angles = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-i))) * scale_f).toBigInt.asSInt((bw+1).W)))
     private val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
     private val zero = 0.S((bw+1).W)
-    private val quad_ang = (0 until 9).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W))
+    private val PI = (BigDecimal(Math.PI) * scale_f).toBigInt.asSInt((bw+1).W)
+    private val PIdiv2 = (BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
+    private val threePIdiv2 = (3 * BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
+    private val quad_ang = VecInit((0 until 5).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W)))
 
-    val cond = (1 until 9).map(i=>(io.in_d > quad_ang(i) && io.in_d <= quad_ang(i-1)))
-    val res = (1 until 9).map(i=>if(i>4) (if((i-1) % 2 == 0) io.in_d - quad_ang(i-1) else quad_ang(i) - io.in_d) else (if((i-1) % 2 == 1) io.in_d - quad_ang(i) else quad_ang(i-1) - io.in_d))
-
-    val corrected_angle = Mux1H(cond,res)
-    val quad_detector = 3.U - OHToUInt(cond)(1,0)
     val inpsign = io.in_d(bw)
+    val updown = io.in_d.abs > PI
+    val leftright = Mux(updown, io.in_d.abs > threePIdiv2, io.in_d.abs > PIdiv2)
+    val quad_idx = VecInit(Seq(leftright, updown)).asUInt
+    val quad_idx_inv = (~quad_idx).asUInt
 
+    val quad_detector = Mux(inpsign, quad_idx_inv, quad_idx)
+    val res = Mux(leftright, quad_ang(quad_idx_inv +& 0.U) - io.in_d.abs, io.in_d.abs - quad_ang(quad_idx_inv +& 1.U))
+    val corrected_angle = Mux(inpsign, -res, res)
+
+    val pipe_skip = if (latency >= n) 1 else  n / latency
+    val pipe_map = Array.fill(n)(0)
+    for(i <- 0 until latency){
+      pipe_map((i*pipe_skip) % n) += 1
+    }
 
     val (x0,y0,z0) = if(!v) (K_inv, zero, corrected_angle) else (one, io.in_d, zero)
 
@@ -296,35 +308,38 @@ object primitives {
 
     val siw = Wire(Vec(n+1, Bool()))
 
-    val xir = RegInit(VecInit.fill(n)(0.S((bw+1).W)))
-    val yir = RegInit(VecInit.fill(n)(0.S((bw+1).W)))
-    val zir = RegInit(VecInit.fill(n)(0.S((bw+1).W)))
+    val ovalid_wires = Wire(Vec(n, Bool()))
 
-    xiw(0) := x0
-    yiw(0) := y0
-    ziw(0) := z0
+    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+
+    ovalid_wires(0) := io.in_valid
+    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
+
     siw(0) := (if(!v) z0(bw).asBool else !y0(bw).asBool)
+    siw.slice(1,n+1).zip(if(!v) zir_pipeline.slice(0,n) else yir_pipeline.slice(0,n)).foreach(x=> x._1 := (if(v) !x._2.bits(bw).asBool  else x._2.bits(bw).asBool))
 
-    xiw.slice(1,n+1).zip(xir.slice(0,n)).foreach(x=> x._1 := x._2)
-    yiw.slice(1,n+1).zip(yir.slice(0,n)).foreach(x=> x._1 := x._2)
-    ziw.slice(1,n+1).zip(zir.slice(0,n)).foreach(x=> x._1 := x._2)
-    siw.slice(1,n+1).zip(if(!v) zir.slice(0,n) else yir.slice(0,n)).foreach(x=> x._1 := (if(!v) x._2(bw).asBool else !x._2(bw).asBool))
+    // initial iteration
+    xiw(0) := x0 + Mux(siw(0), y0, -y0).asSInt
+    yiw(0) := y0 + Mux(siw(0), -x0, x0).asSInt
+    ziw(0) := z0 + Mux(siw(0), angles(0), -angles(0))
 
-    when(io.in_en) {
-      for (i <- 0 until n) {
-        xir(i) := xiw(i) + Mux(siw(i), yiw(i) >> i, -yiw(i) >> i).asSInt
-        yir(i) := yiw(i) + Mux(siw(i), -xiw(i) >> i, xiw(i) >> i).asSInt
-        zir(i) := ziw(i) + Mux(siw(i), angles(i), -angles(i))
-      }
+    xiw(n) := xir_pipeline.last.bits
+    yiw(n) := yir_pipeline.last.bits
+    ziw(n) := zir_pipeline.last.bits
+
+    for (i <- 1 until n) {
+      xiw(i) := xir_pipeline(i-1).bits + (Mux(siw(i), yir_pipeline(i-1).bits, -yir_pipeline(i-1).bits) >> i).asSInt
+      yiw(i) := yir_pipeline(i-1).bits + (Mux(siw(i), -xir_pipeline(i-1).bits, xir_pipeline(i-1).bits) >> i).asSInt
+      ziw(i) := zir_pipeline(i-1).bits + Mux(siw(i), angles(i), -angles(i))
     }
 
-    val quad_detected = ShiftRegister(quad_detector, n, io.in_en)
-    val sign_detected = ShiftRegister(inpsign, n, io.in_en)
+    val quad_detected = ShiftRegister(quad_detector, latency, io.in_en)
+    val sign_detected = ShiftRegister(inpsign, latency, io.in_en)
 
-    val cos = Wire(SInt((bw+1).W))
-    val sin = Wire(SInt((bw+1).W))
-    cos := 0.S
-    sin := 0.S
+    val cos = WireDefault(0.S((bw+1).W))
+    val sin = WireDefault(0.S((bw+1).W))
 
     switch(quad_detected){
       is (0.U){
@@ -345,11 +360,10 @@ object primitives {
       }
     }
 
-    io.out_valid := ShiftRegister(io.in_valid, n, io.in_en)
+    io.out_valid := xir_pipeline.last.valid
     io.out_x := (if(!v) cos else xiw(n))
     io.out_y := (if(!v) sin else yiw(n))
     io.out_z := ziw(n)
-//    io.out_z := ShiftRegister(quad_detector, n, io.in_en)
   }
 
 }
