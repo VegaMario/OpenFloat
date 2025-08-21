@@ -368,7 +368,8 @@ object primitives {
 
   def atanh(x: Double): Double = {
     require(x > -1.0 && x < 1.0, "atanh is only defined for -1 < x < 1")
-    0.5 * log((1.0 + x) / (1.0 - x))
+    val r = 0.5 * log((1.0 + x) / (1.0 - x))
+    r
   }
 
   // universal cordic
@@ -390,21 +391,16 @@ object primitives {
 
     val normal_i = (0 until n).toArray
     val hyper_i = (1 until n+1).flatMap(i=>{
-      if(i==4 || i==10 || i==40 || i==121)
+      if(i==4 || i==13 || i==40 || i==121)
         Array(i,i)
       else
         Array(i)
     }).toArray.slice(0,n)
 
     private val scale_f = BigDecimal(2).pow(fbits)
-    private val Kbase = (0 until n).map(i => BigDecimal(Math.sqrt(1 + Math.pow(2, -(normal_i(i)) * 2)))).product
-    private val K_inv = (((1/Kbase) * scale_f).toBigInt).asSInt((bw+1).W)
-    private val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
     private val a_arctan = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-(normal_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
     private val a_pow2 = VecInit((0 until n).map(i=> (BigDecimal(Math.pow(2,-(normal_i(i)))) * scale_f).toBigInt.asSInt((bw+1).W)))
     private val a_hypertan = VecInit((0 until n).map(i=> (BigDecimal(atanh(Math.pow(2,-(hyper_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
-    private val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
-    private val zero = 0.S((bw+1).W)
 
     val pipe_skip = if (latency >= n) 1 else  n / latency
     val pipe_map = Array.fill(n)(0)
@@ -419,22 +415,23 @@ object primitives {
     val ziw = Wire(Vec(n+1, SInt((bw+1).W)))
 
     val aiw = WireDefault(VecInit.fill(n)(0.S((bw+1).W)))
-    val iterw = WireDefault(VecInit(normal_i.map(_.asUInt)))
-
+    val iterw = WireDefault(VecInit.fill(n)(0.U(log2Ceil(n).W)))
 
     val mu = io.ctrl_mode
     val diw = Wire(Vec(n+1, Bool()))
 
     switch(mu){
-      is(-1.S){
+      is(-1.S(2.W)){
         aiw := a_hypertan
-        iterw := VecInit(hyper_i.map(_.asUInt))
+        iterw := VecInit(hyper_i.map(_.asUInt(log2Ceil(n).W)))
       }
-      is(0.S){
+      is(0.S(2.W)){
         aiw := a_pow2
+        iterw := VecInit(normal_i.map(_.asUInt(log2Ceil(n).W)))
       }
-      is(1.S){
+      is(1.S(2.W)){
         aiw := a_arctan
+        iterw := VecInit(normal_i.map(_.asUInt(log2Ceil(n).W)))
       }
     }
 
@@ -451,7 +448,8 @@ object primitives {
     diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(bw).asBool, zir_pipeline(x._2).bits(bw).asBool))
 
     // initial iteration
-    xiw(0) := x0 + (Mux(mu === 0.S, 0.S((bw+1).W), Mux(diw(0) && !mu(1).asBool, y0, -y0)) >> iterw(0)).asSInt
+    val y0_mu = Mux(mu(1).asBool, -y0, y0)
+    xiw(0) := x0 + (Mux(mu === 0.S(2.W), 0.S((bw+1).W), Mux(diw(0), y0_mu, -y0_mu)) >> iterw(0)).asSInt
     yiw(0) := y0 + (Mux(diw(0), -x0, x0) >> iterw(0)).asSInt
     ziw(0) := z0 + Mux(diw(0), aiw(0), -aiw(0))
 
@@ -460,7 +458,8 @@ object primitives {
     ziw(n) := zir_pipeline.last.bits
 
     for (i <- 1 until n) {
-      xiw(i) := xir_pipeline(i-1).bits + (Mux(mu === 0.S, 0.S((bw+1).W), Mux(diw(i) && !mu(1).asBool, yir_pipeline(i-1).bits, -yir_pipeline(i-1).bits)) >> iterw(i)).asSInt
+      val yi_mu = Mux(mu(1).asBool, -yir_pipeline(i-1).bits, yir_pipeline(i-1).bits)
+      xiw(i) := xir_pipeline(i-1).bits + (Mux(mu === 0.S(2.W), 0.S((bw+1).W), Mux(diw(i), yi_mu, -yi_mu)) >> iterw(i)).asSInt
       yiw(i) := yir_pipeline(i-1).bits + (Mux(diw(i), -xir_pipeline(i-1).bits, xir_pipeline(i-1).bits) >> iterw(i)).asSInt
       ziw(i) := zir_pipeline(i-1).bits + Mux(diw(i), aiw(i), -aiw(i))
     }
