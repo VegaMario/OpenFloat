@@ -151,12 +151,11 @@ object testbench extends App {
     }
   }
 
-  class CORDIC_TEST extends AnyFlatSpec with ChiselScalatestTester{
-    behavior of "CORDIC_TEST"
+  class COS_TEST extends AnyFlatSpec with ChiselScalatestTester{
+    behavior of "COS_TEST"
     it should "do something" in {
       val fbits = 45
       val bw = 48
-      val vmode = false
       val n = 40
 
       val trials = 1E6.toInt
@@ -177,19 +176,19 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new cordic(bw, vmode, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
-        c.io.in_en.poke(true.B)
+      test(new cos(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+        c.io.out_ready.poke(true.B)
         while(in_cnt < total_in){
           c.io.in_valid.poke(true.B)
-          c.io.in_d.poke((rand_in(in_cnt) * scale_f).toBigInt)
+          c.io.in_angle.poke((rand_in(in_cnt) * scale_f).toBigInt)
           c.clock.step()
           c.io.in_valid.poke(false.B)
           clk += 1
           in_cnt += 1
           if(c.io.out_valid.peekBoolean()){
 //            println(clk)
-            hw_cos_out(out_cnt) = BigDecimal(c.io.out_x.peekInt()) / scale_f
-            hw_sin_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_cos_out(out_cnt) = BigDecimal(c.io.out_cos.peekInt()) / scale_f
+            hw_sin_out(out_cnt) = BigDecimal(c.io.out_sin.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
@@ -198,17 +197,20 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            hw_cos_out(out_cnt) = BigDecimal(c.io.out_x.peekInt()) / scale_f
-            hw_sin_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_cos_out(out_cnt) = BigDecimal(c.io.out_cos.peekInt()) / scale_f
+            hw_sin_out(out_cnt) = BigDecimal(c.io.out_sin.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
         }
         c.clock.step(10)
         val error_cos = cos_out.zip(hw_cos_out).map(x=>{
+//          println(s"exp: ${x._1}, obs: ${x._2}")
           ((x._2 - x._1).abs / x._1) * 100
         })
+//        println()
         val error_sin = sin_out.zip(hw_sin_out).map(x=>{
+//          println(s"exp: ${x._1}, obs: ${x._2}")
           ((x._2 - x._1).abs / x._1) * 100
         })
 
@@ -293,9 +295,9 @@ object testbench extends App {
   class UCORDIC_TEST2 extends AnyFlatSpec with ChiselScalatestTester{
     behavior of "UCORDIC_TEST2"
     it should "do something" in {
-      val fbits = 46
-      val bw = 48
-      val n = 48
+      val fbits = 23
+      val bw = 25
+      val n = 23
 
       val trials = 1E3.toInt
 
@@ -319,7 +321,7 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)){c=>
+      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
         c.io.in_en.poke(true.B)
         c.io.ctrl_vectoring.poke(false.B)
         c.io.ctrl_mode.poke(-1.S)
@@ -328,7 +330,6 @@ object testbench extends App {
           c.io.in_x.poke(Kprime_inv)
           c.io.in_y.poke(Kprime_inv)
           c.io.in_z.poke((rand_in2(in_cnt) * scale_f).toBigInt)
-//          c.io.in_z.poke((rand_in(in_cnt) * scale_f).toBigInt)
           c.clock.step()
           c.io.in_valid.poke(false.B)
           clk += 1
@@ -370,5 +371,5 @@ object testbench extends App {
   // run test
 //  runTest(new SQRT_TEST)
 //  runTest(new DIV_TEST)
-  runTest(new UCORDIC_TEST2)
+  runTest(new COS_TEST)
 }

@@ -1,6 +1,6 @@
 package Primitives
 import chisel3._
-import chisel3.util.{Mux1H, MuxCase, OHToUInt, Pipe, ShiftRegister, is, log2Ceil, switch}
+import chisel3.util.{MuxCase, Pipe, ShiftRegister, is, log2Ceil, switch}
 import scala.math._
 object primitives {
 
@@ -373,6 +373,13 @@ object primitives {
   }
 
   // universal cordic
+  // domain restrictions for ensuring convergence (just the approximate domain)
+  // circular rotation: |in_z| <= pi/2
+  // circular vectoring: all in_x and in_y
+  // linear rotation: |in_z| <= 2
+  // linear vectoring: |in_y/in_x| <= 2 and in_x != 0
+  // hyperbolic rotation: |in_z| <= 1
+  // hyperbolic tangent: |in_y| < |in_x| and in_x != 0
   class ucordic(bw: Int, fbits: Int, n: Int, latency: Int) extends Module{
     val io = IO(new Bundle{
       val in_en = Input(Bool())
@@ -470,4 +477,60 @@ object primitives {
     io.out_z := ziw(n)
   }
 
+  // ucordic for cos/sin
+  class cos(bw: Int, fbits: Int, iters: Int, latency: Int) extends Module{
+    val io = IO(new Bundle{
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_angle = Input(SInt((bw+1).W))
+      val out_valid = Output(Bool())
+      val out_cos = Output(SInt((bw+1).W))
+      val out_sin = Output(SInt((bw+1).W))
+    })
+    val scale_f = BigDecimal(2).pow(fbits)
+    val K_inv = ((0.607252935009 * scale_f).toBigInt).asSInt((bw+1).W)
+    val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
+    val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+    val zero = 0.S((bw+1).W)
+
+    val PI = (BigDecimal(Math.PI) * scale_f).toBigInt.asSInt((bw+1).W)
+    val PIdiv2 = (BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
+    val threePIdiv2 = (3 * BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
+    val quad_ang = VecInit((0 until 5).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W)))
+
+    val inpsign = io.in_angle(bw)
+    val updown = io.in_angle.abs > PI
+    val leftright = Mux(updown, io.in_angle.abs > threePIdiv2, io.in_angle.abs > PIdiv2)
+    val quad_idx = VecInit(Seq(leftright, updown)).asUInt
+    val quad_idx_inv = (~quad_idx).asUInt
+
+    val quad_detector = Mux(inpsign, quad_idx_inv, quad_idx)
+    val res = Mux(leftright, quad_ang(quad_idx_inv +& 0.U) - io.in_angle.abs, io.in_angle.abs - quad_ang(quad_idx_inv +& 1.U))
+    val corrected_angle = Mux(inpsign, -res, res)
+
+    val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
+
+    ucordic.in_en := io.out_ready
+    ucordic.ctrl_vectoring := false.B
+    ucordic.ctrl_mode := 1.S(2.W)
+    ucordic.in_valid := io.in_valid
+    ucordic.in_x := K_inv
+    ucordic.in_y := zero
+    ucordic.in_z := corrected_angle
+
+    val quad_detected = ShiftRegister(quad_detector, latency, io.out_ready)
+    val sign_detected = ShiftRegister(inpsign, latency, io.out_ready)
+
+    val cos = WireDefault(0.S((bw+1).W))
+    val sin = WireDefault(0.S((bw+1).W))
+
+    cos := Mux(quad_detected.xorR, -ucordic.out_x, ucordic.out_x)
+    sin := Mux(quad_detected(1).asBool ^ sign_detected, -ucordic.out_y, ucordic.out_y)
+
+    io.in_ready := io.out_ready
+    io.out_valid := ucordic.out_valid
+    io.out_cos := cos
+    io.out_sin := sin
+  }
 }
