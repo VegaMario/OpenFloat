@@ -1,7 +1,7 @@
 package Primitives
 import chisel3._
 import chisel3.util.{Mux1H, MuxCase, OHToUInt, Pipe, ShiftRegister, is, log2Ceil, switch}
-
+import scala.math._
 object primitives {
 
   // finds the leading zero count of an input radix-bit number
@@ -363,6 +363,111 @@ object primitives {
     io.out_valid := xir_pipeline.last.valid
     io.out_x := (if(!v) cos else xiw(n))
     io.out_y := (if(!v) sin else yiw(n))
+    io.out_z := ziw(n)
+  }
+
+  def atanh(x: Double): Double = {
+    require(x > -1.0 && x < 1.0, "atanh is only defined for -1 < x < 1")
+    0.5 * log((1.0 + x) / (1.0 - x))
+  }
+
+  // universal cordic
+  class ucordic(bw: Int, fbits: Int, n: Int, latency: Int) extends Module{
+    val io = IO(new Bundle{
+      val in_en = Input(Bool())
+      val in_valid = Input(Bool())
+      val ctrl_vectoring = Input(Bool())
+      val ctrl_mode = Input(SInt(2.W))
+      val in_x = Input(SInt((bw+1).W))
+      val in_y = Input(SInt((bw+1).W))
+      val in_z = Input(SInt((bw+1).W))
+      val out_x = Output(SInt((bw+1).W))
+      val out_y = Output(SInt((bw+1).W))
+      val out_z = Output(SInt((bw+1).W))
+      val out_valid = Output(Bool())
+    })
+    override def desiredName = s"ucordic_${bw}_$n"
+
+    val normal_i = (0 until n).toArray
+    val hyper_i = (1 until n+1).flatMap(i=>{
+      if(i==4 || i==10 || i==40 || i==121)
+        Array(i,i)
+      else
+        Array(i)
+    }).toArray.slice(0,n)
+
+    private val scale_f = BigDecimal(2).pow(fbits)
+    private val Kbase = (0 until n).map(i => BigDecimal(Math.sqrt(1 + Math.pow(2, -(normal_i(i)) * 2)))).product
+    private val K_inv = (((1/Kbase) * scale_f).toBigInt).asSInt((bw+1).W)
+    private val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
+    private val a_arctan = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-(normal_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
+    private val a_pow2 = VecInit((0 until n).map(i=> (BigDecimal(Math.pow(2,-(normal_i(i)))) * scale_f).toBigInt.asSInt((bw+1).W)))
+    private val a_hypertan = VecInit((0 until n).map(i=> (BigDecimal(atanh(Math.pow(2,-(hyper_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
+    private val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+    private val zero = 0.S((bw+1).W)
+
+    val pipe_skip = if (latency >= n) 1 else  n / latency
+    val pipe_map = Array.fill(n)(0)
+    for(i <- 0 until latency){
+      pipe_map((i*pipe_skip) % n) += 1
+    }
+
+    val (x0,y0,z0) = (io.in_x, io.in_y, io.in_z)
+
+    val xiw = Wire(Vec(n+1, SInt((bw+1).W)))
+    val yiw = Wire(Vec(n+1, SInt((bw+1).W)))
+    val ziw = Wire(Vec(n+1, SInt((bw+1).W)))
+
+    val aiw = WireDefault(VecInit.fill(n)(0.S((bw+1).W)))
+    val iterw = WireDefault(VecInit(normal_i.map(_.asUInt)))
+
+
+    val mu = io.ctrl_mode
+    val diw = Wire(Vec(n+1, Bool()))
+
+    switch(mu){
+      is(-1.S){
+        aiw := a_hypertan
+        iterw := VecInit(hyper_i.map(_.asUInt))
+      }
+      is(0.S){
+        aiw := a_pow2
+      }
+      is(1.S){
+        aiw := a_arctan
+      }
+    }
+
+    val ovalid_wires = Wire(Vec(n, Bool()))
+
+    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+
+    ovalid_wires(0) := io.in_valid
+    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
+
+    diw(0) := Mux(io.ctrl_vectoring, !y0(bw).asBool, z0(bw).asBool)
+    diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(bw).asBool, zir_pipeline(x._2).bits(bw).asBool))
+
+    // initial iteration
+    xiw(0) := x0 + (Mux(mu === 0.S, 0.S((bw+1).W), Mux(diw(0) && !mu(1).asBool, y0, -y0)) >> iterw(0)).asSInt
+    yiw(0) := y0 + (Mux(diw(0), -x0, x0) >> iterw(0)).asSInt
+    ziw(0) := z0 + Mux(diw(0), aiw(0), -aiw(0))
+
+    xiw(n) := xir_pipeline.last.bits
+    yiw(n) := yir_pipeline.last.bits
+    ziw(n) := zir_pipeline.last.bits
+
+    for (i <- 1 until n) {
+      xiw(i) := xir_pipeline(i-1).bits + (Mux(mu === 0.S, 0.S((bw+1).W), Mux(diw(i) && !mu(1).asBool, yir_pipeline(i-1).bits, -yir_pipeline(i-1).bits)) >> iterw(i)).asSInt
+      yiw(i) := yir_pipeline(i-1).bits + (Mux(diw(i), -xir_pipeline(i-1).bits, xir_pipeline(i-1).bits) >> iterw(i)).asSInt
+      ziw(i) := zir_pipeline(i-1).bits + Mux(diw(i), aiw(i), -aiw(i))
+    }
+
+    io.out_valid := xir_pipeline.last.valid
+    io.out_x := xiw(n)
+    io.out_y := yiw(n)
     io.out_z := ziw(n)
   }
 
