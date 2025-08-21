@@ -301,8 +301,13 @@ object testbench extends App {
 
       val scale_f = BigDecimal(2).pow(fbits)
       val rand_in = (0 until trials).map(i=>genDouble(0.1,0.9))
-      val rand_in2 = (0 until trials).map(i=>genDouble(0.5,1))
-      val out = rand_in.zip(rand_in2).map(x=>x._1 / x._2)
+      val rand_in2 = (0 until trials).map(i=>genDouble(-1,1))
+      val out = rand_in.zip(rand_in2).map(x=>Math.exp(x._2))
+
+      val K_inv = ((0.607252935009 * scale_f).toBigInt).asSInt((bw+1).W)
+      val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
+      val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+      val zero = 0.S((bw+1).W)
 
       val hw_out = Array.fill(trials)(BigDecimal(0))
       val hw_clk = Array.fill(trials)(BigInt(0))
@@ -314,21 +319,23 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)){c=>
         c.io.in_en.poke(true.B)
-        c.io.ctrl_vectoring.poke(true.B)
-        c.io.ctrl_mode.poke(0.S)
+        c.io.ctrl_vectoring.poke(false.B)
+        c.io.ctrl_mode.poke(-1.S)
         while(in_cnt < total_in){
           c.io.in_valid.poke(true.B)
-          c.io.in_y.poke((rand_in(in_cnt) * scale_f).toBigInt)
-          c.io.in_x.poke((rand_in2(in_cnt) * scale_f).toBigInt)
+          c.io.in_x.poke(Kprime_inv)
+          c.io.in_y.poke(Kprime_inv)
+          c.io.in_z.poke((rand_in2(in_cnt) * scale_f).toBigInt)
+//          c.io.in_z.poke((rand_in(in_cnt) * scale_f).toBigInt)
           c.clock.step()
           c.io.in_valid.poke(false.B)
           clk += 1
           in_cnt += 1
           if(c.io.out_valid.peekBoolean()){
             //            println(clk)
-            hw_out(out_cnt) = BigDecimal(c.io.out_z.peekInt()) / scale_f
+            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
@@ -337,14 +344,14 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            hw_out(out_cnt) = BigDecimal(c.io.out_z.peekInt()) / scale_f
+            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
         }
         c.clock.step(10)
         val error = out.zip(hw_out).zip(rand_in).zip(rand_in2).map(x=>{
-          println(s"${x._1._2} x ${x._2} = exp: ${x._1._1._1}, obs: ${x._1._1._2}")
+          println(s"Math.exp(${x._2}) = expected: ${x._1._1._1}, observed: ${x._1._1._2}")
           ((x._1._1._2 - x._1._1._1).abs / x._1._1._1) * 100
         })
 
