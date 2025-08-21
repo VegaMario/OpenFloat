@@ -224,6 +224,138 @@ object testbench extends App {
     }
   }
 
+  class UCORDIC_TEST extends AnyFlatSpec with ChiselScalatestTester{
+    behavior of "UCORDIC_TEST"
+    it should "do something" in {
+      val fbits = 46
+      val bw = 48
+      val n = 64
+
+      val trials = 1E3.toInt
+
+      val scale_f = BigDecimal(2).pow(fbits)
+      val rand_in = (0 until trials).map(i=>genDouble(-2,2))
+      val rand_in2 = (0 until trials).map(i=>genDouble(-2,2))
+      val out = rand_in.zip(rand_in2).map(x=>x._1 * x._2)
+
+      val hw_out = Array.fill(trials)(BigDecimal(0))
+      val hw_clk = Array.fill(trials)(BigInt(0))
+
+      val total_in = trials
+      val total_out = trials
+
+      var in_cnt = 0
+      var out_cnt = 0
+      var clk = 0
+
+      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+        c.io.in_en.poke(true.B)
+        c.io.ctrl_vectoring.poke(false.B)
+        c.io.ctrl_mode.poke(0.S)
+        while(in_cnt < total_in){
+          c.io.in_valid.poke(true.B)
+          c.io.in_x.poke((rand_in(in_cnt) * scale_f).toBigInt)
+          c.io.in_z.poke((rand_in2(in_cnt) * scale_f).toBigInt)
+          c.clock.step()
+          c.io.in_valid.poke(false.B)
+          clk += 1
+          in_cnt += 1
+          if(c.io.out_valid.peekBoolean()){
+            //            println(clk)
+            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_clk(out_cnt) = clk
+            out_cnt += 1
+          }
+        }
+        while(out_cnt < total_out){
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_clk(out_cnt) = clk
+            out_cnt += 1
+          }
+        }
+        c.clock.step(10)
+        val error = out.zip(hw_out).zip(rand_in).zip(rand_in2).map(x=>{
+          println(s"${x._1._2} x ${x._2} = exp: ${x._1._1._1}, obs: ${x._1._1._2}")
+          ((x._1._1._2 - x._1._1._1).abs / x._1._1._1) * 100
+        })
+
+        val max_err = error.max
+        val avg_err = error.sum / error.length
+        println(s"AVG Error: ${avg_err}%")
+        println(s"Largest Error: ${max_err}%")
+      }
+    }
+  }
+
+  class UCORDIC_TEST2 extends AnyFlatSpec with ChiselScalatestTester{
+    behavior of "UCORDIC_TEST2"
+    it should "do something" in {
+      val fbits = 46
+      val bw = 48
+      val n = 48
+
+      val trials = 1E3.toInt
+
+      val scale_f = BigDecimal(2).pow(fbits)
+      val rand_in = (0 until trials).map(i=>genDouble(0.1,0.9))
+      val rand_in2 = (0 until trials).map(i=>genDouble(0.5,1))
+      val out = rand_in.zip(rand_in2).map(x=>x._1 / x._2)
+
+      val hw_out = Array.fill(trials)(BigDecimal(0))
+      val hw_clk = Array.fill(trials)(BigInt(0))
+
+      val total_in = trials
+      val total_out = trials
+
+      var in_cnt = 0
+      var out_cnt = 0
+      var clk = 0
+
+      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+        c.io.in_en.poke(true.B)
+        c.io.ctrl_vectoring.poke(true.B)
+        c.io.ctrl_mode.poke(0.S)
+        while(in_cnt < total_in){
+          c.io.in_valid.poke(true.B)
+          c.io.in_y.poke((rand_in(in_cnt) * scale_f).toBigInt)
+          c.io.in_x.poke((rand_in2(in_cnt) * scale_f).toBigInt)
+          c.clock.step()
+          c.io.in_valid.poke(false.B)
+          clk += 1
+          in_cnt += 1
+          if(c.io.out_valid.peekBoolean()){
+            //            println(clk)
+            hw_out(out_cnt) = BigDecimal(c.io.out_z.peekInt()) / scale_f
+            hw_clk(out_cnt) = clk
+            out_cnt += 1
+          }
+        }
+        while(out_cnt < total_out){
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            hw_out(out_cnt) = BigDecimal(c.io.out_z.peekInt()) / scale_f
+            hw_clk(out_cnt) = clk
+            out_cnt += 1
+          }
+        }
+        c.clock.step(10)
+        val error = out.zip(hw_out).zip(rand_in).zip(rand_in2).map(x=>{
+          println(s"${x._1._2} x ${x._2} = exp: ${x._1._1._1}, obs: ${x._1._1._2}")
+          ((x._1._1._2 - x._1._1._1).abs / x._1._1._1) * 100
+        })
+
+        val max_err = error.max
+        val avg_err = error.sum / error.length
+        println(s"AVG Error: ${avg_err}%")
+        println(s"Largest Error: ${max_err}%")
+      }
+    }
+  }
+
   private def runTest(tb: => AnyFlatSpec with ChiselScalatestTester): Unit = {
     tb.execute()
   }
@@ -231,5 +363,5 @@ object testbench extends App {
   // run test
 //  runTest(new SQRT_TEST)
 //  runTest(new DIV_TEST)
-  runTest(new CORDIC_TEST)
+  runTest(new UCORDIC_TEST2)
 }
