@@ -366,12 +366,6 @@ object primitives {
     io.out_z := ziw(n)
   }
 
-  def atanh(x: Double): Double = {
-    require(x > -1.0 && x < 1.0, "atanh is only defined for -1 < x < 1")
-    val r = 0.5 * log((1.0 + x) / (1.0 - x))
-    r
-  }
-
   // universal cordic
   // domain restrictions for ensuring convergence (just the approximate domain)
   // circular rotation: |in_z| <= pi/2
@@ -403,6 +397,12 @@ object primitives {
       else
         Array(i)
     }).toArray.slice(0,n)
+
+    def atanh(x: Double): Double = {
+      require(x > -1.0 && x < 1.0, "atanh is only defined for -1 < x < 1")
+      val r = 0.5 * log((1.0 + x) / (1.0 - x))
+      r
+    }
 
     private val scale_f = BigDecimal(2).pow(fbits)
     private val a_arctan = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-(normal_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
@@ -532,5 +532,60 @@ object primitives {
     io.out_valid := ucordic.out_valid
     io.out_cos := cos
     io.out_sin := sin
+  }
+
+  class atan(bw: Int, fbits: Int, iters: Int, latency: Int) extends Module{
+    val io = IO(new Bundle{
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_y = Input(SInt((bw+1).W))
+      val out_valid = Output(Bool())
+      val out_atany = Output(SInt((bw+1).W))
+    })
+    val scale_f = BigDecimal(2).pow(fbits)
+    val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+    val zero = 0.S((bw+1).W)
+
+    val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
+
+    ucordic.in_en := io.out_ready
+    ucordic.ctrl_vectoring := true.B
+    ucordic.ctrl_mode := 1.S(2.W)
+    ucordic.in_valid := io.in_valid
+    ucordic.in_x := one
+    ucordic.in_y := io.in_y
+    ucordic.in_z := zero
+
+    io.in_ready := io.out_ready
+    io.out_valid := ucordic.out_valid
+    io.out_atany := ucordic.out_z
+  }
+
+  class exp(bw: Int, fbits: Int, iters: Int, latency: Int) extends Module{
+    val io = IO(new Bundle{
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_z = Input(SInt((bw+1).W))
+      val out_valid = Output(Bool())
+      val out_expz = Output(SInt((bw+1).W))
+    })
+    val scale_f = BigDecimal(2).pow(fbits)
+    val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
+
+    val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
+
+    ucordic.in_en := io.out_ready
+    ucordic.ctrl_vectoring := false.B
+    ucordic.ctrl_mode := -1.S(2.W)
+    ucordic.in_valid := io.in_valid
+    ucordic.in_x := Kprime_inv
+    ucordic.in_y := Kprime_inv
+    ucordic.in_z := io.in_z
+
+    io.in_ready := io.out_ready
+    io.out_valid := ucordic.out_valid
+    io.out_expz := ucordic.out_y
   }
 }
