@@ -96,6 +96,61 @@ object testbench extends App {
     }
   }
 
+  class EXP_TEST extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "EXP_TEST"
+    it should "do something" in {
+      val runs = 1E3.toInt
+
+      val inputs = Array.fill(runs)(BigDecimal(genDouble(-50,50)))
+      val expected_outputs = inputs.map(x=>BigDecimal(Math.exp(x.toDouble))).toArray
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val observed_output = Array.fill(runs)(BigDecimal(0))
+
+      var cnt_out = 0
+      var clk = 0
+
+      test(new FP_exp(32)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+        c.clock.setTimeout(0)
+        c.io.in_en.poke(true.B)
+        c.io.in_valid.poke(true.B)
+        for(i <- 0 until runs){
+          c.io.in_data.poke(hardware_inputs(i))
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+
+        c.io.in_valid.poke(false.B)
+
+        while(cnt_out < runs){
+          c.clock.step()
+          clk += 1
+          if(c.io.out_valid.peekBoolean()){
+            println(clk)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, 32)
+            cnt_out += 1
+          }
+        }
+        c.clock.step(10)
+
+        val error = expected_outputs.zip(observed_output).map(x=>{
+          println(s"expected: ${x._1}, observed: ${x._2}")
+          ((x._2 - x._1).abs / x._1) * 100
+        })
+
+        val max_err = error.max
+        val avg_err = error.sum / error.length
+        println(s"AVG Error: ${avg_err}%")
+        println(s"Largest Error: ${max_err}%")
+
+
+      }
+    }
+  }
+
   class DIV_TEST extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "DIV_TEST"
     it should "do something" in {
@@ -295,9 +350,9 @@ object testbench extends App {
   class UCORDIC_TEST2 extends AnyFlatSpec with ChiselScalatestTester{
     behavior of "UCORDIC_TEST2"
     it should "do something" in {
-      val fbits = 23
-      val bw = 25
-      val n = 23
+      val fbits = 48
+      val bw = 50
+      val n = 24
 
       val trials = 1E3.toInt
 
@@ -321,14 +376,14 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
-        c.io.in_en.poke(true.B)
-        c.io.ctrl_vectoring.poke(false.B)
-        c.io.ctrl_mode.poke(-1.S)
+      test(new exp(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+        c.io.out_ready.poke(true.B)
+//        c.io.ctrl_vectoring.poke(false.B)
+//        c.io.ctrl_mode.poke(-1.S)
         while(in_cnt < total_in){
           c.io.in_valid.poke(true.B)
-          c.io.in_x.poke(Kprime_inv)
-          c.io.in_y.poke(Kprime_inv)
+//          c.io.in_x.poke(Kprime_inv)
+//          c.io.in_y.poke(Kprime_inv)
           c.io.in_z.poke((rand_in2(in_cnt) * scale_f).toBigInt)
           c.clock.step()
           c.io.in_valid.poke(false.B)
@@ -336,7 +391,7 @@ object testbench extends App {
           in_cnt += 1
           if(c.io.out_valid.peekBoolean()){
             //            println(clk)
-            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_out(out_cnt) = BigDecimal(c.io.out_expz.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
@@ -345,7 +400,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            hw_out(out_cnt) = BigDecimal(c.io.out_y.peekInt()) / scale_f
+            hw_out(out_cnt) = BigDecimal(c.io.out_expz.peekInt()) / scale_f
             hw_clk(out_cnt) = clk
             out_cnt += 1
           }
@@ -371,5 +426,5 @@ object testbench extends App {
   // run test
 //  runTest(new SQRT_TEST)
 //  runTest(new DIV_TEST)
-  runTest(new COS_TEST)
+  runTest(new EXP_TEST)
 }

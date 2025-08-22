@@ -20,5 +20,5 @@ object generate extends App {
   }
 
   // generate verilog
-  genVerilog(new FP_sqrt(32, 23, 7))
+  genVerilog(new FP_exp(32))
 }

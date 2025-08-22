@@ -811,4 +811,102 @@ object fpu {
 
   }
 
+  class FP_exp(bw: Int) extends Module{
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle{
+      val in_en = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_data = Input(UInt(bw.W))
+      val out_valid = Output(Bool())
+      val out_data = Output(UInt(bw.W))
+    })
+    override def desiredName = s"FP_exp_${bw}"
+
+    def csdTerms(n0: BigInt): Array[(Int, Int)] = {
+      if (n0 == 0) return Array.empty
+
+      val globalSign = if (n0 < 0) -1 else 1
+      var k = n0.abs
+      var i = 0
+      val out = scala.collection.mutable.ArrayBuffer.empty[(Int, Int)]
+
+      while (k > 0) {
+        if ((k & 1) == 1) {
+          val mod4 = (k & 3).toInt // 1 or 3 when k is odd
+          val ui = if (mod4 == 1) 1 else -1
+          out += ((globalSign * ui, i))
+          k -= ui                    // subtract (+1) or subtract (-1) ≡ add 1
+        }
+        k = k >> 1
+        i += 1
+      }
+
+      out.toArray
+    }
+
+    val (exponent, mantissa) = bw match {
+      case 16 => (5,10)
+      case 32 => (8,23)
+      case 64 => (11,52)
+      case 128 => (15,112)
+    }
+    val bias = BigInt(2).pow(exponent - 1) - 1
+
+    val max_exp = (bias + exponent - 2).U(exponent.W)
+    val min_exp = (bias - mantissa).U(exponent.W)
+    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
+    val min_frac = 0.U(mantissa.W)
+
+    val sign_wire = Wire(UInt(1.W))
+    sign_wire := io.in_data(bw - 1)
+
+    val exp_wire = Wire(UInt(exponent.W))
+    val frac_wire = Wire(UInt((mantissa + 1).W))
+    when(io.in_data(bw - 2, mantissa) > max_exp) {
+      exp_wire := max_exp
+      frac_wire := 1.U ## max_frac
+    }.elsewhen(io.in_data(bw-2,mantissa) < min_exp){
+      exp_wire := min_exp
+      frac_wire := 1.U ## min_frac
+    }.otherwise {
+      exp_wire := io.in_data(bw - 2, mantissa)
+      frac_wire := 1.U ## io.in_data(mantissa - 1, 0)
+    }
+
+    val scale_f = BigDecimal(2).pow(mantissa+1)
+    val ln2 = csdTerms((0.6931471806 * scale_f).toBigInt)
+    val ln2_inv = csdTerms((1.442695041 * scale_f).toBigInt)
+
+    val x_inp = sign_wire ## exp_wire ## frac_wire(mantissa-1,0)
+
+    val float_fixed = Module(new FloatTOFixed(bw, exponent-1, mantissa+1)).io
+    float_fixed.in_en := io.in_en
+    float_fixed.in_valid := io.in_valid
+    float_fixed.in_float := x_inp
+
+    val fx = float_fixed.out_fixed
+    val fy = (ShiftRegister(VecInit(ln2_inv.map(i=> ((if (i._1 == -1) -fx else fx) << i._2).asSInt)).reduceTree(_+&_), 1, io.in_en) >> (mantissa+1))(bw-1,0).asSInt
+
+    val w_fy_ifneg = (fy + -1.S(bw.W))(bw-1, mantissa+1) + 1.U(1.W)
+    val w_fy = Mux(fy(bw-1), w_fy_ifneg, fy(bw-1, mantissa+1))
+    val sr_w_fy = ShiftRegister(w_fy, 1 + bw, io.in_en)
+    val f_fy = (fy(bw-1) ## fy(mantissa, 0)).asSInt.pad(bw)
+
+    val fcord_in = (ShiftRegister(VecInit(ln2.map(i=> ((if (i._1 == -1) -f_fy else f_fy) << i._2).asSInt)).reduceTree(_+&_), 1, io.in_en) >> (mantissa+1))(bw-1,0).asSInt
+
+    val new_fcord_in = (fcord_in(mantissa+3,0) ## 0.U((exponent - 2).W)).asSInt
+
+    val cordic_exp = Module(new exp(bw, mantissa + exponent - 1, bw, bw)).io
+    cordic_exp.out_ready := io.in_en
+    cordic_exp.in_valid := ShiftRegister(float_fixed.out_valid, 2, io.in_en)
+    cordic_exp.in_z := new_fcord_in
+
+    val exp_norm = !cordic_exp.out_expz(bw-2)
+    val final_mant = Mux(exp_norm, cordic_exp.out_expz(bw-4, bw-mantissa-3), cordic_exp.out_expz(bw-3, bw-mantissa-2))
+    val final_exp = bias.U(exponent.W) + sr_w_fy - exp_norm.asUInt
+    val final_sign = 0.U(1.W)
+
+    io.out_valid := cordic_exp.out_valid
+    io.out_data := final_sign ## final_exp ## final_mant
+  }
 }
