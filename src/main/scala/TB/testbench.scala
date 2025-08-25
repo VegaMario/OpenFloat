@@ -306,7 +306,7 @@ object testbench extends App {
       var clk = 0
 
       test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
-        c.io.in_en.poke(true.B)
+        c.io.out_ready.poke(true.B)
         c.io.ctrl_vectoring.poke(false.B)
         c.io.ctrl_mode.poke(0.S)
         while(in_cnt < total_in){

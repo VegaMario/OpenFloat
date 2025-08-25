@@ -141,41 +141,39 @@ object primitives {
     val b_aux_pipeline = b_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
     val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
 
-    ovalid_wires(0) := io.in_valid
-    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
     io.out_valid := result_pipeline.last.valid
     io.out_s := result_pipeline.last.bits
     io.out_r  := a_aux_pipeline.last.bits
-    io.in_ready := io.out_ready
+    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    ovalid_wires(0) := io.in_valid && io.in_ready
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid && io.in_ready
     val ina = if (frac) io.in_a ## 0.U(bw.W) else 0.U(bw.W) ## io.in_a
     val inb = if (frac) io.in_b ## 0.U(bw.W) else 0.U(bw.W) ## io.in_b
-    when(io.out_ready){
-      for (i <- 0 until L) {
-        if (i == 0) {
-          val t = VecInit(0.U(bw.W).asBools)
-          val shifted_b = if (frac) inb else (inb << (bw-1)).asUInt
-          when(ina >= shifted_b) {
-            a_aux_wires(0) := ina - shifted_b
-            t(bw - 1) := 1.U
-          }.otherwise {
-            a_aux_wires(0) := ina
-            t(bw - 1) := 0.U
-          }
-          result_wires(0) := t.asUInt
-          b_aux_wires(0) := shifted_b
-        } else {
-          val shifted_b = (b_aux_pipeline(i - 1).bits >> 1).asUInt
-          val t = VecInit(result_pipeline(i - 1).bits.asBools)
-          when(a_aux_pipeline(i - 1).bits >= shifted_b) {
-            a_aux_wires(i) := a_aux_pipeline(i - 1).bits - shifted_b
-            t(bw - 1 - i) := 1.U
-          }.otherwise {
-            a_aux_wires(i) := a_aux_pipeline(i - 1).bits
-            t(bw - 1 - i) := 0.U
-          }
-          result_wires(i) := t.asUInt
-          b_aux_wires(i) := shifted_b
+    for (i <- 0 until L) {
+      if (i == 0) {
+        val t = VecInit(0.U(bw.W).asBools)
+        val shifted_b = if (frac) inb else (inb << (bw-1)).asUInt
+        when(ina >= shifted_b) {
+          a_aux_wires(0) := ina - shifted_b
+          t(bw - 1) := 1.U
+        }.otherwise {
+          a_aux_wires(0) := ina
+          t(bw - 1) := 0.U
         }
+        result_wires(0) := t.asUInt
+        b_aux_wires(0) := shifted_b
+      } else {
+        val shifted_b = (b_aux_pipeline(i - 1).bits >> 1).asUInt
+        val t = VecInit(result_pipeline(i - 1).bits.asBools)
+        when(a_aux_pipeline(i - 1).bits >= shifted_b) {
+          a_aux_wires(i) := a_aux_pipeline(i - 1).bits - shifted_b
+          t(bw - 1 - i) := 1.U
+        }.otherwise {
+          a_aux_wires(i) := a_aux_pipeline(i - 1).bits
+          t(bw - 1 - i) := 0.U
+        }
+        result_wires(i) := t.asUInt
+        b_aux_wires(i) := shifted_b
       }
     }
   }
@@ -206,9 +204,6 @@ object primitives {
     val X_pipeline = X_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
     val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
 
-    ovalid_wires(0) := io.in_valid
-    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
-
     val one = 1.U(1.W) ## 0.U((bw*2).W)
     val shifted_sqrd_ones = Wire(Vec(L, UInt((bw*2+1).W)))
     shifted_sqrd_ones.zipWithIndex.foreach(x=> x._1 := (one >> ((x._2 + 1)*2)))
@@ -219,32 +214,32 @@ object primitives {
     io.out_valid := result_pipeline.last.valid
     io.out_s := result_pipeline.last.bits
     val in = (io.in_a ## 0.U(bw.W)) - one
-    io.in_ready := io.out_ready
+    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    ovalid_wires(0) := io.in_valid && io.in_ready
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid && io.in_ready
     //    printf(p"results: ${results}\n")
-    when(io.out_ready){
-      for(i <- 0 until L){
-        if(i == 0){
-          val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
-          val y = shifted_one +& one
-          val yleqx = y <= in
-          P_wires(0) := Mux(yleqx, shifted_ones(i) + one, one)
-          X_wires(0) := Mux(yleqx, in - y, in)
-          val t = VecInit(0.U(bw.W).asBools)
-          t(bw-1) := yleqx
-          result_wires(0) := t.asUInt
-        }else{
-          val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
-          val shifted_P = shifted_ps(i-1)
-          val y = shifted_P +& shifted_one
-          val yleqx = y <= X_pipeline(i-1).bits
-          if(i != L - 1) {
-            P_wires(i) := Mux(yleqx, shifted_ones(i) + P_pipeline(i-1).bits, P_pipeline(i-1).bits)
-            X_wires(i) := Mux(yleqx, X_pipeline(i-1).bits - y, X_pipeline(i-1).bits)
-          }
-          val t = VecInit(result_pipeline(i-1).bits.asBools)
-          t(bw-1 - i):= yleqx
-          result_wires(i) := t.asUInt
+    for(i <- 0 until L){
+      if(i == 0){
+        val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
+        val y = shifted_one +& one
+        val yleqx = y <= in
+        P_wires(0) := Mux(yleqx, shifted_ones(i) + one, one)
+        X_wires(0) := Mux(yleqx, in - y, in)
+        val t = VecInit(0.U(bw.W).asBools)
+        t(bw-1) := yleqx
+        result_wires(0) := t.asUInt
+      }else{
+        val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
+        val shifted_P = shifted_ps(i-1)
+        val y = shifted_P +& shifted_one
+        val yleqx = y <= X_pipeline(i-1).bits
+        if(i != L - 1) {
+          P_wires(i) := Mux(yleqx, shifted_ones(i) + P_pipeline(i-1).bits, P_pipeline(i-1).bits)
+          X_wires(i) := Mux(yleqx, X_pipeline(i-1).bits - y, X_pipeline(i-1).bits)
         }
+        val t = VecInit(result_pipeline(i-1).bits.asBools)
+        t(bw-1 - i):= yleqx
+        result_wires(i) := t.asUInt
       }
     }
   }
@@ -376,7 +371,8 @@ object primitives {
   // hyperbolic tangent: |in_y| < |in_x| and in_x != 0
   class ucordic(bw: Int, fbits: Int, n: Int, latency: Int) extends Module{
     val io = IO(new Bundle{
-      val in_en = Input(Bool())
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
       val in_valid = Input(Bool())
       val ctrl_vectoring = Input(Bool())
       val ctrl_mode = Input(SInt(2.W))
@@ -448,8 +444,9 @@ object primitives {
     val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
     val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
 
-    ovalid_wires(0) := io.in_valid
-    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
+    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    ovalid_wires(0) := io.in_valid && io.in_ready
+    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid && io.in_ready
 
     diw(0) := Mux(io.ctrl_vectoring, !y0(bw).asBool, z0(bw).asBool)
     diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(bw).asBool, zir_pipeline(x._2).bits(bw).asBool))
@@ -490,7 +487,6 @@ object primitives {
     })
     val scale_f = BigDecimal(2).pow(fbits)
     val K_inv = ((0.607252935009 * scale_f).toBigInt).asSInt((bw+1).W)
-    val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
     val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
     val zero = 0.S((bw+1).W)
 
@@ -511,7 +507,7 @@ object primitives {
 
     val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
 
-    ucordic.in_en := io.out_ready
+    ucordic.out_ready := io.out_ready
     ucordic.ctrl_vectoring := false.B
     ucordic.ctrl_mode := 1.S(2.W)
     ucordic.in_valid := io.in_valid
@@ -519,8 +515,8 @@ object primitives {
     ucordic.in_y := zero
     ucordic.in_z := corrected_angle
 
-    val quad_detected = ShiftRegister(quad_detector, latency, io.out_ready)
-    val sign_detected = ShiftRegister(inpsign, latency, io.out_ready)
+    val quad_detected = ShiftRegister(quad_detector, latency, ucordic.in_ready)
+    val sign_detected = ShiftRegister(inpsign, latency, ucordic.in_ready)
 
     val cos = WireDefault(0.S((bw+1).W))
     val sin = WireDefault(0.S((bw+1).W))
@@ -528,7 +524,7 @@ object primitives {
     cos := Mux(quad_detected.xorR, -ucordic.out_x, ucordic.out_x)
     sin := Mux(quad_detected(1).asBool ^ sign_detected, -ucordic.out_y, ucordic.out_y)
 
-    io.in_ready := io.out_ready
+    io.in_ready := ucordic.in_ready
     io.out_valid := ucordic.out_valid
     io.out_cos := cos
     io.out_sin := sin
@@ -549,7 +545,7 @@ object primitives {
 
     val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
 
-    ucordic.in_en := io.out_ready
+    ucordic.out_ready := io.out_ready
     ucordic.ctrl_vectoring := true.B
     ucordic.ctrl_mode := 1.S(2.W)
     ucordic.in_valid := io.in_valid
@@ -557,7 +553,7 @@ object primitives {
     ucordic.in_y := io.in_y
     ucordic.in_z := zero
 
-    io.in_ready := io.out_ready
+    io.in_ready := ucordic.in_ready
     io.out_valid := ucordic.out_valid
     io.out_atany := ucordic.out_z
   }
@@ -576,7 +572,7 @@ object primitives {
 
     val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
 
-    ucordic.in_en := io.out_ready
+    ucordic.out_ready := io.out_ready
     ucordic.ctrl_vectoring := false.B
     ucordic.ctrl_mode := -1.S(2.W)
     ucordic.in_valid := io.in_valid
@@ -584,7 +580,7 @@ object primitives {
     ucordic.in_y := Kprime_inv
     ucordic.in_z := io.in_z
 
-    io.in_ready := io.out_ready
+    io.in_ready := ucordic.in_ready
     io.out_valid := ucordic.out_valid
     io.out_expz := ucordic.out_y
   }
