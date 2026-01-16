@@ -132,21 +132,26 @@ object primitives {
       pipe_map((i*pipe_skip) % L) += 1
     }
 
+    // Pipeline enable: advance when output is consumed or no valid output
+    val pipe_enable = io.out_ready || !io.out_valid
+
     val a_aux_wires = WireDefault(VecInit.fill(L)(0.U((bw*2).W)))
     val b_aux_wires = WireDefault(VecInit.fill(L)(0.U((bw*2).W)))
     val result_wires = WireDefault(VecInit.fill(L)(0.U(bw.W)))
     val ovalid_wires = Wire(Vec(L, Bool()))
 
-    val a_aux_pipeline = a_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
-    val b_aux_pipeline = b_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
-    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2)).toArray
+    val a_aux_pipeline = a_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2)).toArray
+    val b_aux_pipeline = b_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2)).toArray
+    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2)).toArray
 
     io.out_valid := result_pipeline.last.valid
     io.out_s := result_pipeline.last.bits
     io.out_r  := a_aux_pipeline.last.bits
-    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    // Ready when pipeline can advance
+    io.in_ready := pipe_enable
+    // Input enters pipeline on valid handshake
     ovalid_wires(0) := io.in_valid && io.in_ready
-    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid && io.in_ready
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
     val ina = if (frac) io.in_a ## 0.U(bw.W) else 0.U(bw.W) ## io.in_a
     val inb = if (frac) io.in_b ## 0.U(bw.W) else 0.U(bw.W) ## io.in_b
     for (i <- 0 until L) {
@@ -195,14 +200,17 @@ object primitives {
       pipe_map((i*pipe_skip) % L) += 1
     }
 
+    // Pipeline enable: advance when output is consumed or no valid output
+    val pipe_enable = io.out_ready || !io.out_valid
+
     val P_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+1).W)))
     val X_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+2).W)))
     val result_wires = WireDefault(VecInit.fill(L)(0.U(bw.W)))
     val ovalid_wires = Wire(Vec(L, Bool()))
 
-    val P_pipeline = P_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val X_pipeline = X_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val P_pipeline = P_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val X_pipeline = X_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
 
     val one = 1.U(1.W) ## 0.U((bw*2).W)
     val shifted_sqrd_ones = Wire(Vec(L, UInt((bw*2+1).W)))
@@ -214,9 +222,11 @@ object primitives {
     io.out_valid := result_pipeline.last.valid
     io.out_s := result_pipeline.last.bits
     val in = (io.in_a ## 0.U(bw.W)) - one
-    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    // Ready when pipeline can advance
+    io.in_ready := pipe_enable
+    // Input enters pipeline on valid handshake
     ovalid_wires(0) := io.in_valid && io.in_ready
-    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid && io.in_ready
+    for(i <- 1 until L) ovalid_wires(i) := result_pipeline(i-1).valid
     //    printf(p"results: ${results}\n")
     for(i <- 0 until L){
       if(i == 0){
@@ -258,7 +268,8 @@ object primitives {
 
   class cordic(bw: Int, v: Boolean, fbits: Int, n: Int, latency: Int) extends Module{
     val io = IO(new Bundle{
-      val in_en = Input(Bool())
+      val in_ready = Output(Bool())
+      val out_ready = Input(Bool())
       val in_valid = Input(Bool())
       val in_d = Input(SInt((bw+1).W))
       val out_x = Output(SInt((bw+1).W))
@@ -278,6 +289,9 @@ object primitives {
     private val PIdiv2 = (BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
     private val threePIdiv2 = (3 * BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
     private val quad_ang = VecInit((0 until 5).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W)))
+
+    // Pipeline enable: advance when output is consumed or no valid output
+    val pipe_enable = io.out_ready || !io.out_valid
 
     val inpsign = io.in_d(bw)
     val updown = io.in_d.abs > PI
@@ -305,11 +319,14 @@ object primitives {
 
     val ovalid_wires = Wire(Vec(n, Bool()))
 
-    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
 
-    ovalid_wires(0) := io.in_valid
+    // Ready when pipeline can advance
+    io.in_ready := pipe_enable
+    // Input enters pipeline on valid handshake
+    ovalid_wires(0) := io.in_valid && io.in_ready
     for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
 
     siw(0) := (if(!v) z0(bw).asBool else !y0(bw).asBool)
@@ -330,8 +347,8 @@ object primitives {
       ziw(i) := zir_pipeline(i-1).bits + Mux(siw(i), angles(i), -angles(i))
     }
 
-    val quad_detected = ShiftRegister(quad_detector, latency, io.in_en)
-    val sign_detected = ShiftRegister(inpsign, latency, io.in_en)
+    val quad_detected = ShiftRegister(quad_detector, latency, pipe_enable)
+    val sign_detected = ShiftRegister(inpsign, latency, pipe_enable)
 
     val cos = WireDefault(0.S((bw+1).W))
     val sin = WireDefault(0.S((bw+1).W))
@@ -438,15 +455,20 @@ object primitives {
       }
     }
 
+    // Pipeline enable: advance when output is consumed or no valid output
+    val pipe_enable = io.out_ready || !io.out_valid
+
     val ovalid_wires = Wire(Vec(n, Bool()))
 
-    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
-    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2,i._1._1,i._2))
+    val xir_pipeline = xiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val yir_pipeline = yiw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val zir_pipeline = ziw.slice(0,n).zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
 
-    io.in_ready := !io.out_valid || (io.out_valid && io.out_ready)
+    // Ready when pipeline can advance
+    io.in_ready := pipe_enable
+    // Input enters pipeline on valid handshake
     ovalid_wires(0) := io.in_valid && io.in_ready
-    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid && io.in_ready
+    for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
 
     diw(0) := Mux(io.ctrl_vectoring, !y0(bw).asBool, z0(bw).asBool)
     diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(bw).asBool, zir_pipeline(x._2).bits(bw).asBool))
@@ -515,8 +537,10 @@ object primitives {
     ucordic.in_y := zero
     ucordic.in_z := corrected_angle
 
-    val quad_detected = ShiftRegister(quad_detector, latency, ucordic.in_ready)
-    val sign_detected = ShiftRegister(inpsign, latency, ucordic.in_ready)
+    // Pipeline enable derived from ucordic's ready signal
+    val pipe_enable = ucordic.in_ready
+    val quad_detected = ShiftRegister(quad_detector, latency, pipe_enable)
+    val sign_detected = ShiftRegister(inpsign, latency, pipe_enable)
 
     val cos = WireDefault(0.S((bw+1).W))
     val sin = WireDefault(0.S((bw+1).W))
