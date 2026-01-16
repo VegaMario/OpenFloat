@@ -34,7 +34,7 @@ object testbench extends App {
       // simple test to see output of multiplier module
       // since fst is enabled, look for a test_run_dir directory to be created, it will have fst files when run
       test(new FP_add(32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
-        c.io.in_en.poke(true.B)
+        c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         c.io.in_a.poke(convert_string_to_IEEE_754("12.2", 32))
         c.io.in_b.poke(convert_string_to_IEEE_754("41.6", 32))
@@ -59,7 +59,7 @@ object testbench extends App {
 
       test(new FP_sqrt(32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
-        c.io.in_en.poke(true.B)
+        c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         for(i <- 0 until runs){
           c.io.in_a.poke(hardware_inputs(i))
@@ -111,7 +111,7 @@ object testbench extends App {
 
       test(new FP_exp(32)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.clock.setTimeout(0)
-        c.io.in_en.poke(true.B)
+        c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         for(i <- 0 until runs){
           c.io.in_data.poke(hardware_inputs(i))
@@ -168,7 +168,7 @@ object testbench extends App {
 
       test(new FP_div(32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
-        c.io.in_en.poke(true.B)
+        c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         for(i <- 0 until runs){
           c.io.in_a.poke(hardware_inputs(i))
