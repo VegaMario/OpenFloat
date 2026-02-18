@@ -14,6 +14,7 @@ OpenFloat provides a library of highly configurable floating-point arithmetic mo
 OpenFloat/
 ├── src/main/scala/
 │   ├── FloatingPoint/          # Core FPU modules
+│   │   ├── FloatingPointFormat.scala # Supported Floating Point Formats
 │   │   └── fpu.scala           # All floating-point operation implementations
 │   ├── Primitives/             # Low-level building blocks
 │   │   ├── primitives.scala    # Arithmetic primitives (adders, dividers, CORDIC, etc.)
