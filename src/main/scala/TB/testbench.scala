@@ -6,7 +6,7 @@ import Primitives.convert.{convert_IEEE754_to_Decimal, convert_string_to_IEEE_75
 import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
-import FloatingPoint.{BF16, FP16, FP32, FP64, FP128, CustomFormat}
+import FloatingPoint.{BF16, CustomFormat, FP128, FP16, FP32, FP64, FloatingPointFormat}
 
 import java.math.MathContext
 import scala.util.Random
@@ -29,36 +29,36 @@ object testbench extends App {
   }
 
   // tb examples
-  class BasicTest extends AnyFlatSpec with ChiselScalatestTester {
+  class BasicTest(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "BasicTest"
     it should "do something" in {
       // simple test to see output of multiplier module
       // since fst is enabled, look for a test_run_dir directory to be created, it will have fst files when run
-      test(new FP_add(FP32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+      test(new FP_add(fmt,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
-        c.io.in_a.poke(convert_string_to_IEEE_754("12.2", 32))
-        c.io.in_b.poke(convert_string_to_IEEE_754("41.6", 32))
+        c.io.in_a.poke(convert_string_to_IEEE_754("12.2", fmt))
+        c.io.in_b.poke(convert_string_to_IEEE_754("41.6", fmt))
         c.clock.step(7)
-        println(s"output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+        println(s"output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)}")
       }
     }
   }
 
-  class SQRT_TEST extends AnyFlatSpec with ChiselScalatestTester {
+  class SQRT_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "SQRT_TEST"
     it should "do something" in {
       val runs = 1E6.toInt
 
       val inputs = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
       val expected_outputs = inputs.map(_.bigDecimal.sqrt(MathContext.DECIMAL32)).toArray
-      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
       val observed_output = Array.fill(runs)(BigDecimal(0))
 
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_sqrt(FP32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+      test(new FP_sqrt(fmt, fmt.mantissa, fmt.mantissa)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -67,7 +67,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -78,7 +78,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -97,20 +97,20 @@ object testbench extends App {
     }
   }
 
-  class EXP_TEST extends AnyFlatSpec with ChiselScalatestTester {
+  class EXP_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "EXP_TEST"
     it should "do something" in {
       val runs = 1E3.toInt
 
       val inputs = Array.fill(runs)(BigDecimal(genDouble(-50,50)))
       val expected_outputs = inputs.map(x=>BigDecimal(Math.exp(x.toDouble))).toArray
-      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
       val observed_output = Array.fill(runs)(BigDecimal(0))
 
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_exp(FP32)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+      test(new FP_exp(fmt)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -119,7 +119,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -131,7 +131,7 @@ object testbench extends App {
           clk += 1
           if(c.io.out_valid.peekBoolean()){
             println(clk)
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -152,7 +152,7 @@ object testbench extends App {
     }
   }
 
-  class DIV_TEST extends AnyFlatSpec with ChiselScalatestTester {
+  class DIV_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "DIV_TEST"
     it should "do something" in {
       val runs = 1E6.toInt
@@ -160,14 +160,14 @@ object testbench extends App {
       val inputs = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
       val inputs2 = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
       val expected_outputs = inputs.zip(inputs2).map(i=>i._1.bigDecimal.divide(i._2.bigDecimal, MathContext.DECIMAL32))
-      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
-      val hardware_inputs2 = inputs2.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, 32))
+      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
+      val hardware_inputs2 = inputs2.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
       val observed_output = Array.fill(runs)(BigDecimal(0))
 
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_div(FP32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+      test(new FP_div(fmt, fmt.mantissa, fmt.mantissa)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -177,7 +177,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -188,7 +188,7 @@ object testbench extends App {
           c.clock.step()
           clk += 1
           if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)
+            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
             cnt_out += 1
           }
         }
@@ -425,7 +425,8 @@ object testbench extends App {
   }
 
   // run test
-//  runTest(new SQRT_TEST)
-//  runTest(new DIV_TEST)
-  runTest(new EXP_TEST)
+//  runTest(new BasicTest(FP32))
+//  runTest(new SQRT_TEST(FP32))
+//  runTest(new DIV_TEST(FP32))
+//  runTest(new EXP_TEST(FP32))
 }

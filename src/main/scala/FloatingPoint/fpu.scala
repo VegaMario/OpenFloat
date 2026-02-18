@@ -603,7 +603,7 @@ object fpu {
       val out_sin = Output(UInt(bw.W))
     })
     override def desiredName = s"${FORMAT}_cos_$iters"
-    val TWOPI = convert_string_to_IEEE_754((Math.PI * 2 ).toString, bw).U(bw.W)
+    val TWOPI = convert_string_to_IEEE_754((Math.PI * 2 ).toString, FORMAT).U(bw.W)
 
     // Chain modules with ready-valid handshaking
     val fpdiv = Module(new FP_div(FORMAT,bw/2-1,bw/2-1)).io
