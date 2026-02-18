@@ -7,8 +7,7 @@ import chisel3.util.{Counter, ShiftRegister, log2Ceil}
 object fpu {
 
   // Digit recurrence based division
-  class FP_div(bw: Int, L: Int, latency: Int) extends Module {
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+  class FP_div(FORMAT: FloatingPointFormat, L: Int, latency: Int) extends FPModule(FORMAT) {
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -18,19 +17,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_divider_${bw}_${L}_${latency}"
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    val max_exp = (BigInt(2).pow(exponent) - 2).U(exponent.W)
-    val min_exp = 1.U(exponent.W)
-    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
-    val min_frac = 0.U(mantissa.W)
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
-
+    override def desiredName = s"${FORMAT}_divider_${L}_${latency}"
     // Instantiate divider first to get its ready signal
     val frac_divider = Module(new divider((mantissa + 2), L, latency, true)).io
     frac_divider.out_ready := io.out_ready
@@ -107,14 +94,8 @@ object fpu {
   }
 
   // digit recurrence based fp square root
-  class FP_sqrt(bw: Int, L: Int, latency: Int) extends Module {
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    require((bw == 16 || bw == 32 || bw == 64 || bw == 128) && L <= mantissa)
+  class FP_sqrt(FORMAT: FloatingPointFormat, L: Int, latency: Int) extends FPModule(FORMAT) {
+    require(L <= mantissa)
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -123,7 +104,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_sqrt_${bw}_${L}_${latency}"
+    override def desiredName = s"${FORMAT}_sqrt_${L}_${latency}"
 
     // Instantiate sqrt first to get its ready signal
     val fsqrt = Module(new frac_sqrt(mantissa,L, latency)).io
@@ -135,7 +116,6 @@ object fpu {
     // Propagate ready signal
     io.in_ready := fsqrt.in_ready
 
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
     val sign = io.in_a(bw - 1)
     val exp = io.in_a(bw-2, mantissa) -& bias
     val frac = 1.U(2.W) ## io.in_a(mantissa - 1, 0)
@@ -156,8 +136,7 @@ object fpu {
   }
 
   // multiplier
-  class FP_mult(bw: Int, pd: Int) extends Module {
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+  class FP_mult(FORMAT: FloatingPointFormat, pd: Int) extends FPModule(FORMAT) {
     require(pd == 1 || pd == 3 || pd == 7 || pd == 8 || pd == 10 || pd == 13)
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
@@ -168,13 +147,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_mult_${bw}_${pd}"
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
+    override def desiredName = s"${FORMAT}_mult_${pd}"
     val sr_array = pd match {
       case 1 => Array(0,0,0,0,0,0,0,0,0,1)
       case 3 => Array(1,0,0,1,1,0,0,0,0,0)
@@ -200,12 +173,6 @@ object fpu {
     val sign_wire = Wire(Vec(2, UInt(1.W)))
     sign_wire(0) := in_a(bw - 1)
     sign_wire(1) := in_b(bw - 1)
-
-    val max_exp = (BigInt(2).pow(exponent) - 2).U(exponent.W)
-    val min_exp = 1.U(exponent.W)
-    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
-    val min_frac = 0.U(mantissa.W)
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
 
     // get the exponents of the two inputs
     val exp_wire = Wire(Vec(2, UInt(exponent.W)))
@@ -305,8 +272,7 @@ object fpu {
   }
 
   // adder
-  class FP_add(bw: Int, pd: Int) extends Module {
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+  class FP_add(FORMAT: FloatingPointFormat, pd: Int) extends FPModule(FORMAT) {
     require(pd == 1 || pd == 3 || pd == 7 || pd == 10 || pd == 11 || pd == 13)
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
@@ -317,13 +283,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_add_${bw}_${pd}"
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
+    override def desiredName = s"${FORMAT}_add_${pd}"
 
     val sr_array = pd match {
       case 1 => Array(0,0,0,0,0,0,0,0,0,1)
@@ -343,12 +303,6 @@ object fpu {
 
     // Ready when pipeline can advance
     io.in_ready := pipe_enable
-
-    val max_exp = (BigInt(2).pow(exponent) - 2).U(exponent.W)
-    val min_exp = 1.U(exponent.W)
-    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
-    val min_frac = 0.U(mantissa.W)
-
 
     val in_a = ShiftRegister(io.in_a,sr_array(0),pipe_enable)
     val in_b = ShiftRegister(io.in_b,sr_array(0),pipe_enable)
@@ -471,16 +425,9 @@ object fpu {
     io.out_s := norm_out_sign ## norm_out_exp ## norm_out_frac
   }
 
-  class FP_acc(bw: Int, iters: Int, ExpExp: Int, ExpMSB: Int, LSB: Int) extends Module {
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
+  class FP_acc(FORMAT: FloatingPointFormat, iters: Int, ExpExp: Int, ExpMSB: Int, LSB: Int) extends FPModule(FORMAT) {
     require(LSB >= mantissa)
     require(ExpMSB >= 1)
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -489,7 +436,7 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_acc_${bw}"
+    override def desiredName = s"${FORMAT}_acc"
 
     val ResultRegWidth = Math.pow(2, log2Ceil(ExpMSB + LSB)).toInt
 
@@ -503,16 +450,9 @@ object fpu {
 
     val input_a = ShiftRegister(io.in_a, 1, pipe_enable) // store in input a
 
-    val bias = (BigInt(2).pow(exponent-1) - 1).U(exponent.W)
 
     // max and min values for saturating use
-    val max_exp = (BigInt(2).pow(exponent) - 2).U(exponent.W)
     val max_expected_exp = (ExpExp.U(exponent.W) + bias - 1.U) // reference value for aligning input a (we expect the input to be smaller than this value)
-    val min_exp = 1.U(exponent.W)
-    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
-    val min_frac = 0.U(mantissa.W)
-
-
 
     // get the sign bit
     val sign_wire = Wire(UInt(1.W))
@@ -652,13 +592,7 @@ object fpu {
     io.out_s := out_sign ## out_exp ## out_frac
   }
 
-  class FP_cos(bw: Int, iters: Int) extends Module{
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
+  class FP_cos(FORMAT: FloatingPointFormat, iters: Int) extends FPModule(FORMAT) {
     val io = IO(new Bundle{
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -668,17 +602,17 @@ object fpu {
       val out_cos = Output(UInt(bw.W))
       val out_sin = Output(UInt(bw.W))
     })
-    override def desiredName = s"FP_cos_${bw}_$iters"
+    override def desiredName = s"${FORMAT}_cos_$iters"
     val TWOPI = convert_string_to_IEEE_754((Math.PI * 2 ).toString, bw).U(bw.W)
 
     // Chain modules with ready-valid handshaking
-    val fpdiv = Module(new FP_div(bw,15,15)).io
-    val fpfloor = Module(new FP_floor(bw)).io
-    val fpmult = Module(new FP_mult(bw,3)).io
-    val floatfixed = Module(new FloatTOFixed(bw, bw-mantissa, mantissa)).io
+    val fpdiv = Module(new FP_div(FORMAT,bw/2-1,bw/2-1)).io
+    val fpfloor = Module(new FP_floor(FORMAT)).io
+    val fpmult = Module(new FP_mult(FORMAT,3)).io
+    val floatfixed = Module(new FloatTOFixed(FORMAT, bw-mantissa, mantissa)).io
     val cordic = Module(new cordic(bw, false, mantissa, iters, iters)).io
-    val fixedfloat_cos = Module(new FixedTOFloat(bw, bw-mantissa, mantissa)).io
-    val fixedfloat_sin = Module(new FixedTOFloat(bw, bw-mantissa, mantissa)).io
+    val fixedfloat_cos = Module(new FixedTOFloat(FORMAT, bw-mantissa, mantissa)).io
+    val fixedfloat_sin = Module(new FixedTOFloat(FORMAT, bw-mantissa, mantissa)).io
 
     // Connect ready signals backwards through the chain
     fixedfloat_cos.out_ready := io.out_ready
@@ -725,13 +659,7 @@ object fpu {
     io.out_sin := fixedfloat_sin.out_float
   }
 
-  class FP_atan(bw: Int, iters: Int) extends Module{
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
+  class FP_atan(FORMAT: FloatingPointFormat, iters: Int) extends FPModule (FORMAT) {
     val io = IO(new Bundle{
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -740,12 +668,12 @@ object fpu {
       val out_valid = Output(Bool())
       val out_atan = Output(UInt(bw.W))
     })
-    override def desiredName = s"FP_atan_${bw}_$iters"
+    override def desiredName = s"${FORMAT}_atan_$iters"
 
     // Chain modules with ready-valid handshaking
-    val floatfixed = Module(new FloatTOFixed(bw, bw/2, bw/2)).io
+    val floatfixed = Module(new FloatTOFixed(FORMAT, bw/2, bw/2)).io
     val cordic = Module(new cordic(bw, true, bw/2, iters, iters)).io
-    val fixedfloat_atan = Module(new FixedTOFloat(bw, bw/2, bw/2)).io
+    val fixedfloat_atan = Module(new FixedTOFloat(FORMAT, bw/2, bw/2)).io
 
     // Connect ready signals backwards through the chain
     fixedfloat_atan.out_ready := io.out_ready
@@ -769,14 +697,7 @@ object fpu {
     io.out_atan := fixedfloat_atan.out_float
   }
 
-  class FloatTOFixed(bw: Int, ibits: Int, fbits: Int) extends Module{
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
+  class FloatTOFixed(FORMAT: FloatingPointFormat, ibits: Int, fbits: Int) extends FPModule(FORMAT) {
     val fixed_width = ibits+fbits
 
     val io = IO(new Bundle{
@@ -814,14 +735,7 @@ object fpu {
     io.out_fixed := ShiftRegister((sign_sr ## output).asSInt, 1, pipe_enable)
   }
 
-  class FixedTOFloat(bw: Int, ibits: Int, fbits: Int) extends Module{
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
+  class FixedTOFloat(FORMAT: FloatingPointFormat, ibits: Int, fbits: Int) extends FPModule(FORMAT) {
     val fixed_width = ibits+fbits
 
     val io = IO(new Bundle{
@@ -856,15 +770,7 @@ object fpu {
     io.out_float := ShiftRegister(signsr ##  shifted_exp ## (if(fbits > mantissa) shifted_frac(fbits-1, fbits-mantissa) else shifted_frac(fbits-1, 0) ## 0.U((mantissa - fbits).W)), 1, pipe_enable)
   }
 
-  class FP_floor(bw: Int) extends Module {
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
-    val (exponent, mantissa) = bw match {
-      case 16 => (5, 10)
-      case 32 => (8, 23)
-      case 64 => (11, 52)
-      case 128 => (15, 112)
-    }
-
+  class FP_floor(FORMAT: FloatingPointFormat) extends FPModule(FORMAT) {
     val io = IO(new Bundle {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -874,7 +780,7 @@ object fpu {
       val out_whole = Output(UInt((exponent + 1).W))
       val out_frac = Output(UInt(bw.W))
     })
-    override def desiredName = s"FP_floor_${bw}"
+    override def desiredName = s"${FORMAT}_floor"
 
     // Track valid through pipeline
     val out_valid_reg = ShiftRegister(io.in_valid && io.in_ready, 1, io.out_ready || !io.out_valid)
@@ -885,8 +791,6 @@ object fpu {
 
     // Ready when pipeline can advance
     io.in_ready := pipe_enable
-
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
 
     val sign_wire = Wire(UInt(1.W))
     val exp_wire = Wire(UInt(exponent.W))
@@ -921,8 +825,7 @@ object fpu {
 
   }
 
-  class FP_exp(bw: Int) extends Module{
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+  class FP_exp(FORMAT: FloatingPointFormat) extends FPModule(FORMAT) {
     val io = IO(new Bundle{
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -931,7 +834,7 @@ object fpu {
       val out_valid = Output(Bool())
       val out_data = Output(UInt(bw.W))
     })
-    override def desiredName = s"FP_exp_${bw}"
+    override def desiredName = s"${FORMAT}_exp"
 
     def csdTerms(n0: BigInt): Array[(Int, Int)] = {
       if (n0 == 0) return Array.empty
@@ -955,21 +858,11 @@ object fpu {
       out.toArray
     }
 
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    val bias = BigInt(2).pow(exponent - 1) - 1
-
-    val max_exp = (bias + exponent - 2).U(exponent.W)
-    val min_exp = (bias - mantissa).U(exponent.W)
-    val max_frac = (BigInt(2).pow(mantissa) - 1).U(mantissa.W)
-    val min_frac = 0.U(mantissa.W)
+    override val max_exp = (FORMAT.bias + exponent - 2).U(exponent.W)
+    override val min_exp = (FORMAT.bias - mantissa).U(exponent.W)
 
     // Instantiate modules for ready-valid chaining
-    val float_fixed = Module(new FloatTOFixed(bw, exponent-1, mantissa+1)).io
+    val float_fixed = Module(new FloatTOFixed(FORMAT, exponent-1, mantissa+1)).io
     val cordic_exp = Module(new exp(bw, mantissa + exponent - 1, bw, bw)).io
 
     // Connect ready signals backwards
@@ -1024,7 +917,7 @@ object fpu {
 
     val exp_norm = !cordic_exp.out_expz(bw-2)
     val final_mant = Mux(exp_norm, cordic_exp.out_expz(bw-4, bw-mantissa-3), cordic_exp.out_expz(bw-3, bw-mantissa-2))
-    val final_exp = bias.U(exponent.W) + sr_w_fy - exp_norm.asUInt
+    val final_exp = FORMAT.bias.U(exponent.W) + sr_w_fy - exp_norm.asUInt
     val final_sign = 0.U(1.W)
 
     io.out_valid := cordic_exp.out_valid
