@@ -1,4 +1,5 @@
 package Generate
+import FloatingPoint.{BF16, FP16, FP32, FP64, FP128, CustomFormat}
 import FloatingPoint.fpu._
 import Primitives.primitives._
 import chisel3._
@@ -20,5 +21,5 @@ object generate extends App {
   }
 
   // generate verilog
-  genVerilog(new FP_exp(32))
+  genVerilog(new FP_exp(FP32))
 }

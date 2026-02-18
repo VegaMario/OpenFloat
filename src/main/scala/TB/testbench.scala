@@ -6,6 +6,7 @@ import Primitives.convert.{convert_IEEE754_to_Decimal, convert_string_to_IEEE_75
 import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
+import FloatingPoint.{BF16, FP16, FP32, FP64, FP128, CustomFormat}
 
 import java.math.MathContext
 import scala.util.Random
@@ -33,7 +34,7 @@ object testbench extends App {
     it should "do something" in {
       // simple test to see output of multiplier module
       // since fst is enabled, look for a test_run_dir directory to be created, it will have fst files when run
-      test(new FP_add(32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+      test(new FP_add(FP32,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         c.io.in_a.poke(convert_string_to_IEEE_754("12.2", 32))
@@ -57,7 +58,7 @@ object testbench extends App {
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_sqrt(32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+      test(new FP_sqrt(FP32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -109,7 +110,7 @@ object testbench extends App {
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_exp(32)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+      test(new FP_exp(FP32)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -166,7 +167,7 @@ object testbench extends App {
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_div(32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+      test(new FP_div(FP32, 23, 23)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
