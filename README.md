@@ -2,11 +2,11 @@
 
 **Code Generators for Floating-Point Unit Design in Integrated Circuits**
 
-OpenFloat is a parameterized floating-point unit (FPU) design generator developed using [Chisel](https://www.chisel-lang.org/), a hardware construction language embedded in Scala. It generates synthesizable RTL for IEEE 754 compliant floating-point arithmetic operations targeting FPGA and ASIC implementations.
+OpenFloat is a parameterized floating-point unit (FPU) design generator developed using [Chisel](https://www.chisel-lang.org/), a hardware construction language embedded in Scala. It generates synthesizable RTL for floating-point arithmetic operations targeting FPGA and ASIC implementations.
 
 ## Overview
 
-OpenFloat provides a library of highly configurable floating-point arithmetic modules that support multiple IEEE 754 precision formats. The design emphasizes:
+OpenFloat provides a library of highly configurable floating-point arithmetic modules that support multiple IEEE 754 precision formats. All modules are parameterized by a `FloatingPointFormat` trait, which defines the exponent and mantissa widths. This allows the same module to be instantiated for any standard format (FP16, BF16, FP32, FP64, FP128) or a custom format.
 
 ## Project Structure
 
@@ -14,7 +14,7 @@ OpenFloat provides a library of highly configurable floating-point arithmetic mo
 OpenFloat/
 ├── src/main/scala/
 │   ├── FloatingPoint/          # Core FPU modules
-│   │   ├── FloatingPointFormat.scala # Supported Floating Point Formats
+│   │   ├── FloatingPointFormat.scala # Format definitions and FPModule base class
 │   │   └── fpu.scala           # All floating-point operation implementations
 │   ├── Primitives/             # Low-level building blocks
 │   │   ├── primitives.scala    # Arithmetic primitives (adders, dividers, CORDIC, etc.)
@@ -48,8 +48,8 @@ You can also define arbitrary custom formats using `CustomFormat(exponent, manti
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_add` | Floating-point addition | `FORMAT`: FloatingPointFormat, `pd`: pipeline depth (1, 3, 7, 10, 11, 13) |
-| `FP_mult` | Floating-point multiplication | `FORMAT`: FloatingPointFormat, `pd`: pipeline depth (1, 3, 7, 8, 10, 13) |
+| `FP_add` | Floating-point addition | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
+| `FP_mult` | Floating-point multiplication | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
 | `FP_div` | Digit-recurrence division | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
 | `FP_sqrt` | Digit-recurrence square root | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
 
@@ -70,6 +70,10 @@ You can also define arbitrary custom formats using `CustomFormat(exponent, manti
 | `FloatTOFixed` | Float to fixed-point conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 | `FixedTOFloat` | Fixed-point to float conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 
+### Pipeline Depth
+
+`FP_add` and `FP_mult` accept any `latency >= 1`. Pipeline registers are automatically distributed across 10 internal stage boundaries using the same `pipe_skip`/`pipe_map` algorithm used by the digit-recurrence primitives (`divider`, `frac_sqrt`, `cordic`). Higher latency values improve timing at the cost of throughput latency; values above 10 stack additional registers at evenly-spaced boundaries.
+
 ## Primitive Modules
 
 The `Primitives` package provides low-level building blocks:
@@ -85,6 +89,17 @@ The `Primitives` package provides low-level building blocks:
 | `cordic` | Fixed-point CORDIC processor (rotation/vectoring modes) |
 | `ucordic` | Universal CORDIC (circular, linear, hyperbolic modes) |
 | `cos`, `atan`, `exp` | Fixed-point trigonometric/exponential wrappers |
+
+## Software Conversion Utilities
+
+The `convert` object provides Scala-side IEEE 754 conversion functions for testbench use:
+
+| Function | Description |
+|----------|-------------|
+| `convert_string_to_IEEE_754(str, fmt)` | Converts a decimal string to an IEEE 754 bit pattern for any `FloatingPointFormat` |
+| `convert_IEEE754_to_Decimal(num, fmt)` | Converts an IEEE 754 bit pattern back to a `BigDecimal` value |
+
+These accept any `FloatingPointFormat` (including `BF16`, `CustomFormat`, etc.), making it easy to generate test vectors and examine outputs for any format.
 
 ## Interface Specification
 
@@ -149,7 +164,6 @@ object generate extends App {
   // Generate desired module
   // Import the formats first: import FloatingPoint.{FP32, FP64, BF16}
   genVerilog(new FP_mult(FP32, 7))  // 32-bit multiplier with 7-stage pipeline
-  genVerilog(new FP_div(FP64, ...))  // 64-bit divider
 }
 ```
 
@@ -158,12 +172,13 @@ Generated SystemVerilog files will be placed in the project root directory.
 ## Module Instantiation Examples
 
 ### Floating-Point Adder
+
 ```scala
 import FloatingPoint._
 import FloatingPoint.fpu._
 
 // 32-bit adder with 7-stage pipeline
-val adder = Module(new FP_add(FORMAT = FP32, pd = 7))
+val adder = Module(new FP_add(FORMAT = FP32, latency = 7))
 adder.io.out_ready := true.B
 adder.io.in_valid := input_valid
 adder.io.in_a := operand_a
@@ -197,13 +212,16 @@ val sin_result = trig.io.out_sin
 ## Algorithm Details
 
 ### Division and Square Root
-Both `FP_div` and `FP_sqrt` use **digit-recurrence algorithms**, computing one bit of the result per iteration. The `L` parameter controls the number of iterations (typically equal to mantissa width + 1), while `latency` controls how iterations are distributed across pipeline stages.
+Both `FP_div` and `FP_sqrt` use **digit-recurrence algorithms**, computing one bit of the result per iteration. The `L` parameter controls the number of iterations (typically equal to mantissa width), while `latency` controls how iterations are distributed across pipeline stages.
 
 ### CORDIC (COordinate Rotation DIgital Computer)
 Trigonometric and hyperbolic functions use the CORDIC algorithm, which computes results through iterative shift-and-add operations. The `ucordic` module supports three modes:
 - **Circular mode** (mu = 1): cos, sin, atan
 - **Linear mode** (mu = 0): multiplication, division
 - **Hyperbolic mode** (mu = -1): sinh, cosh, atanh, exp, ln
+
+### Exponential (e^x)
+`FP_exp` uses range reduction to decompose `x / ln(2) = w + f` into an integer part `w` and fractional part `f`. The fractional part is computed via a hyperbolic CORDIC engine (`e^(f * ln(2)) = 2^f`), while the integer part becomes an exponent bias adjustment. Constant multiplications by `ln(2)` and `1/ln(2)` are implemented using Canonical Signed Digit (CSD) encoding for multiplierless shift-and-add operations.
 
 ### Overflow/Underflow Handling
 All modules implement saturation arithmetic:

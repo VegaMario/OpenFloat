@@ -40,7 +40,7 @@ case object FP128 extends FloatingPointFormat {
 case class CustomFormat(exponent: Int, mantissa: Int) extends FloatingPointFormat
 
 
-case class FPModule(FORMAT: FloatingPointFormat) extends Module {
+class FPModule(FORMAT: FloatingPointFormat) extends Module {
   val bw = FORMAT.bw
   val exponent = FORMAT.exponent
   val mantissa = FORMAT.mantissa
