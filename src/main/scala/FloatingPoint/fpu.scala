@@ -63,10 +63,10 @@ object fpu {
     val new_sign_wire = Wire(UInt(1.W))
     new_sign_wire := sign_wire(0) ^ sign_wire(1)
 
-    // subtract exponent value of the second input from the bias value
+    // compute result exponent: exp_a - exp_b + bias = exp_a - (exp_b - bias)
     val postProcess_exp_subtractor = Module(new full_subtractor(exponent))
-    postProcess_exp_subtractor.io.in_a := exp_wire(0) // the bias
-    postProcess_exp_subtractor.io.in_b := exp_wire(1) - bias // the second input
+    postProcess_exp_subtractor.io.in_a := exp_wire(0) // dividend exponent
+    postProcess_exp_subtractor.io.in_b := exp_wire(1) - bias // divisor exponent minus bias
     postProcess_exp_subtractor.io.in_c := 0.U
 
     frac_divider.in_valid := io.in_valid
@@ -136,8 +136,8 @@ object fpu {
   }
 
   // multiplier
-  class FP_mult(FORMAT: FloatingPointFormat, pd: Int) extends FPModule(FORMAT) {
-    require(pd == 1 || pd == 3 || pd == 7 || pd == 8 || pd == 10 || pd == 13)
+  class FP_mult(FORMAT: FloatingPointFormat, latency: Int) extends FPModule(FORMAT) {
+    require(latency >= 1, "Pipeline depth must be at least 1")
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -147,18 +147,28 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"${FORMAT}_mult_${pd}"
-    val sr_array = pd match {
-      case 1 => Array(0,0,0,0,0,0,0,0,0,1)
-      case 3 => Array(1,0,0,1,1,0,0,0,0,0)
-      case 7 => Array(1,0,0,1,1,0,1,1,1,1)
-      case 8 => Array(1,0,0,2,3,0,1,0,0,1)
-      case 10 => Array(1,1,1,1,1,1,1,1,1,1)
-      case 13 => Array(1,1,1,2,2,1,1,2,1,1)
+    override def desiredName = s"${FORMAT}_mult_${latency}"
+
+    // 10 logical pipeline stage boundaries between combinational blocks:
+    // 0: input registration
+    // 1: after field extraction / before sign computation
+    // 2: after sign XOR / before exponent add
+    // 3: after exponent add / before fraction multiply
+    // 4: after fraction multiply / before overflow/underflow check
+    // 5: after overflow/underflow signals
+    // 6: after flag computation
+    // 7: after normalization mux
+    // 8: after overflow saturation mux
+    // 9: after underflow saturation / output registration
+    private val N_STAGES = 10
+    private val pipe_skip = if (latency >= N_STAGES) 1 else N_STAGES / latency
+    val sr_array = Array.fill(N_STAGES)(0)
+    for (i <- 0 until latency) {
+      sr_array((i * pipe_skip) % N_STAGES) += 1
     }
 
     // Track valid through pipeline using shift register
-    val out_valid_reg = ShiftRegister(io.in_valid && io.in_ready, pd, io.out_ready || !io.out_valid)
+    val out_valid_reg = ShiftRegister(io.in_valid && io.in_ready, latency, io.out_ready || !io.out_valid)
     io.out_valid := out_valid_reg
 
     // Pipeline enable: advance when output is consumed or no valid output
@@ -272,8 +282,8 @@ object fpu {
   }
 
   // adder
-  class FP_add(FORMAT: FloatingPointFormat, pd: Int) extends FPModule(FORMAT) {
-    require(pd == 1 || pd == 3 || pd == 7 || pd == 10 || pd == 11 || pd == 13)
+  class FP_add(FORMAT: FloatingPointFormat, latency: Int) extends FPModule(FORMAT) {
+    require(latency >= 1, "Pipeline depth must be at least 1")
     val io = IO(new Bundle() {
       val in_ready = Output(Bool())
       val out_ready = Input(Bool())
@@ -283,19 +293,28 @@ object fpu {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"${FORMAT}_add_${pd}"
+    override def desiredName = s"${FORMAT}_add_${latency}"
 
-    val sr_array = pd match {
-      case 1 => Array(0,0,0,0,0,0,0,0,0,1)
-      case 3 => Array(0,0,1,0,0,1,0,0,0,1)
-      case 7 => Array(1,0,1,0,1,1,0,1,1,1)
-      case 10 => Array(1,1,1,1,1,1,1,1,1,1)
-      case 11 => Array(1,1,1,1,1,1,1,1,1,2)
-      case 13 => Array(1,1,2,1,1,2,1,1,1,2)
+    // 10 logical pipeline stage boundaries between combinational blocks:
+    // 0: input registration
+    // 1: after field extraction / before exponent subtraction
+    // 2: after exponent subtraction / before equal-exponent arrangement
+    // 3: after arrangement / before mantissa alignment and fraction add setup
+    // 4: after alignment / before fraction addition
+    // 5: after fraction addition / before sign resolution
+    // 6: after sign resolution / before LZC
+    // 7: after LZC / before normalization muxes
+    // 8: after normalization / before final output mux
+    // 9: output registration
+    private val N_STAGES = 10
+    private val pipe_skip = if (latency >= N_STAGES) 1 else N_STAGES / latency
+    val sr_array = Array.fill(N_STAGES)(0)
+    for (i <- 0 until latency) {
+      sr_array((i * pipe_skip) % N_STAGES) += 1
     }
 
     // Track valid through pipeline using shift register
-    val out_valid_reg = ShiftRegister(io.in_valid && io.in_ready, pd, io.out_ready || !io.out_valid)
+    val out_valid_reg = ShiftRegister(io.in_valid && io.in_ready, latency, io.out_ready || !io.out_valid)
     io.out_valid := out_valid_reg
 
     // Pipeline enable: advance when output is consumed or no valid output
@@ -315,17 +334,17 @@ object fpu {
 
     // get the exponents of the two inputs
     val exp_wire = Wire(Vec(2, UInt(exponent.W)))
-    when(in_a(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) {
-      exp_wire(0) := BigInt(2).pow(exponent).U - 2.U
-    }.elsewhen(in_a(bw-2,mantissa) < 1.U){ // saturating inputs
-      exp_wire(0) := 1.U
+    when(in_a(bw - 2, mantissa) > max_exp) {
+      exp_wire(0) := max_exp
+    }.elsewhen(in_a(bw-2,mantissa) < min_exp){ // saturating inputs
+      exp_wire(0) := min_exp
     }.otherwise {
       exp_wire(0) := in_a(bw - 2, mantissa)
     }
-    when(in_b(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) {
-      exp_wire(1) := BigInt(2).pow(exponent).U - 2.U
-    }.elsewhen(in_b(bw-2,mantissa) < 1.U){
-      exp_wire(1) := 1.U
+    when(in_b(bw - 2, mantissa) > max_exp) {
+      exp_wire(1) := max_exp
+    }.elsewhen(in_b(bw-2,mantissa) < min_exp){
+      exp_wire(1) := min_exp
     }.otherwise {
       exp_wire(1) := in_b(bw - 2, mantissa)
     }
@@ -836,6 +855,9 @@ object fpu {
     })
     override def desiredName = s"${FORMAT}_exp"
 
+    // Canonical Signed Digit (CSD) encoding for multiplierless constant multiplication.
+    // Returns (sign, shift_position) pairs where sign is +1 or -1.
+    // CSD guarantees no two consecutive non-zero digits, minimizing add/sub operations.
     def csdTerms(n0: BigInt): Array[(Int, Int)] = {
       if (n0 == 0) return Array.empty
 
@@ -858,12 +880,40 @@ object fpu {
       out.toArray
     }
 
+    // --- Named parameters for the internal fixed-point pipeline ---
+
+    // Float-to-fixed conversion: ibits integer bits, fbits fractional bits
+    // ibits = exponent - 1: covers the max input magnitude (unbiased exp up to exponent-2)
+    // fbits = mantissa + 1: preserves full mantissa precision + implicit leading 1
+    val f2f_ibits = exponent - 1
+    val f2f_fbits = mantissa + 1
+
+    // CSD constant scale factor: constants are scaled by 2^(mantissa+1) for fixed-point precision
+    val csd_scale_bits = mantissa + 1
+
+    // CORDIC fractional bits: maximizes precision within bw bits (bw - 1 sign bit - 1 integer bit + 1)
+    val cordic_fbits = mantissa + exponent - 1 // = bw - 2 for standard formats
+    val cordic_iters = bw
+    val cordic_latency = bw
+
+    // Latency of each CSD multiplier stage (ln2_inv multiply and ln2 multiply)
+    val csd_multiply_latency = 1
+    // Total CSD pipeline stages before CORDIC input
+    val csd_total_stages = 2
+
+    // Delay for the whole-part register to align with CORDIC output
+    val w_fy_delay = csd_multiply_latency + cordic_latency
+
+    // Input range clamping:
+    // max_exp: bias + exponent - 2 limits the max input magnitude so e^x doesn't overflow too far
+    // min_exp: bias - mantissa limits to precision where e^x differs from 1.0
     override val max_exp = (FORMAT.bias + exponent - 2).U(exponent.W)
     override val min_exp = (FORMAT.bias - mantissa).U(exponent.W)
 
-    // Instantiate modules for ready-valid chaining
-    val float_fixed = Module(new FloatTOFixed(FORMAT, exponent-1, mantissa+1)).io
-    val cordic_exp = Module(new exp(bw, mantissa + exponent - 1, bw, bw)).io
+    // --- Module instantiation ---
+
+    val float_fixed = Module(new FloatTOFixed(FORMAT, f2f_ibits, f2f_fbits)).io
+    val cordic_exp = Module(new exp(bw, cordic_fbits, cordic_iters, cordic_latency)).io
 
     // Connect ready signals backwards
     cordic_exp.out_ready := io.out_ready
@@ -874,6 +924,8 @@ object fpu {
 
     // Pipeline enable for side-path shift registers
     val pipe_enable = cordic_exp.in_ready
+
+    // --- Input saturation ---
 
     val sign_wire = Wire(UInt(1.W))
     sign_wire := io.in_data(bw - 1)
@@ -891,34 +943,68 @@ object fpu {
       frac_wire := 1.U ## io.in_data(mantissa - 1, 0)
     }
 
-    val scale_f = BigDecimal(2).pow(mantissa+1)
-    val ln2 = csdTerms((0.6931471806 * scale_f).toBigInt)
-    val ln2_inv = csdTerms((1.442695041 * scale_f).toBigInt)
+    // --- CSD constants for ln(2) and 1/ln(2) ---
+    // High-precision constants to support formats up to FP128
+    val scale_f = BigDecimal(2).pow(csd_scale_bits)
+    val ln2_const = BigDecimal("0.693147180559945309417232121458176568075500134360255254120680009493393621969694715605863326996418687542001481020570685733685520235758130557032670751635075961930727570828371435190307038623891673471123350115364497955239120475172681574932065155524734139525882950453007095326366642654104239157814952043740430385500801953446023295806975610451548712657229174083002445024086242920028700778106122370803036845411583888753703610120930437958500269243404565956307905990388371999379499656975960729908474587863153831040700063")
+    val ln2_inv_const = BigDecimal("1.442695040888963407359924681001892137426645954152985934135449406931109219181185079885526622893506344496263849813826284406414528954088289162413781133626771650471937970821478666919247968697936977415927539950809022728569693098397620784813298345703429109413625901172584843992767912461471748830414917975015078402252652753232103805709076397028379855453978657100095038973614126980230767037249434950879229146629948072798814004361117478512757437282834162183834406512327267713419807971748913504971150085600458327399173946223010457746375823991891783379694308000813")
+    val ln2 = csdTerms((ln2_const * scale_f).toBigInt)
+    val ln2_inv = csdTerms((ln2_inv_const * scale_f).toBigInt)
+
+    // --- Range reduction: x / ln(2) = w + f ---
 
     val x_inp = sign_wire ## exp_wire ## frac_wire(mantissa-1,0)
 
     float_fixed.in_valid := io.in_valid
     float_fixed.in_float := x_inp
 
+    // fx is the fixed-point representation of input x in Q(f2f_ibits).(f2f_fbits) format
     val fx = float_fixed.out_fixed
-    val fy = (ShiftRegister(VecInit(ln2_inv.map(i=> ((if (i._1 == -1) -fx else fx) << i._2).asSInt)).reduceTree(_+&_), 1, pipe_enable) >> (mantissa+1))(bw-1,0).asSInt
 
-    val w_fy_ifneg = (fy + -1.S(bw.W))(bw-1, mantissa+1) + 1.U(1.W)
-    val w_fy = Mux(fy(bw-1), w_fy_ifneg, fy(bw-1, mantissa+1))
-    val sr_w_fy = ShiftRegister(w_fy, 1 + bw, pipe_enable)
+    // fy = fx * (1/ln2) via CSD multiplierless multiplication, then scale correction
+    // Result is in the same Q(f2f_ibits).(f2f_fbits) format as fx
+    val fy = (ShiftRegister(VecInit(ln2_inv.map(i=> ((if (i._1 == -1) -fx else fx) << i._2).asSInt)).reduceTree(_+&_), csd_multiply_latency, pipe_enable) >> csd_scale_bits)(bw-1,0).asSInt
+
+    // --- Split fy into integer part (w) and fractional part (f) ---
+    // fy is Q(f2f_ibits).(f2f_fbits) with fbits = mantissa+1 fractional bits
+    // Integer part is bits [bw-1 : mantissa+1], fractional part is bits [mantissa : 0]
+
+    // Floor for negative values: truncation gives ceiling-toward-zero, so we adjust
+    val w_fy_ifneg = (fy + -1.S(bw.W))(bw-1, f2f_fbits) + 1.U(1.W)
+    val w_fy = Mux(fy(bw-1), w_fy_ifneg, fy(bw-1, f2f_fbits))
+    // Delay w_fy to align with CORDIC output: 1 CSD stage (ln2 multiply) + cordic_latency
+    val sr_w_fy = ShiftRegister(w_fy, w_fy_delay, pipe_enable)
+    // Fractional part: sign bit + lower (mantissa+1) bits, sign-extended to bw
     val f_fy = (fy(bw-1) ## fy(mantissa, 0)).asSInt.pad(bw)
 
-    val fcord_in = (ShiftRegister(VecInit(ln2.map(i=> ((if (i._1 == -1) -f_fy else f_fy) << i._2).asSInt)).reduceTree(_+&_), 1, pipe_enable) >> (mantissa+1))(bw-1,0).asSInt
+    // --- Back-multiply fractional part by ln(2) to get reduced argument ---
+    // fcord_in = f_fy * ln(2), which is the argument for the CORDIC exp engine
+    // This value is in [0, ln(2)) ~ [0, 0.693), within hyperbolic CORDIC convergence range
+    val fcord_in = (ShiftRegister(VecInit(ln2.map(i=> ((if (i._1 == -1) -f_fy else f_fy) << i._2).asSInt)).reduceTree(_+&_), csd_multiply_latency, pipe_enable) >> csd_scale_bits)(bw-1,0).asSInt
 
-    val new_fcord_in = (fcord_in(mantissa+3,0) ## 0.U((exponent - 2).W)).asSInt
+    // Convert fcord_in from Q(f2f_ibits).(f2f_fbits) to the CORDIC's expected Q format
+    // CORDIC expects cordic_fbits fractional bits; we have f2f_fbits = mantissa+1 fractional bits
+    // Zero-pad LSBs by (cordic_fbits - f2f_fbits) = (exponent - 2) bits to align binary points
+    // Slice upper (mantissa+4) bits: sign + 2 guard bits + fractional content
+    val cordic_frac_pad = cordic_fbits - f2f_fbits // = exponent - 2
+    val cordic_slice_hi = mantissa + 3              // sign + 2 guard bits + mantissa fractional
+    val new_fcord_in = (fcord_in(cordic_slice_hi,0) ## 0.U(cordic_frac_pad.W)).asSInt
 
-    cordic_exp.in_valid := ShiftRegister(float_fixed.out_valid, 2, pipe_enable)
+    cordic_exp.in_valid := ShiftRegister(float_fixed.out_valid, csd_total_stages, pipe_enable)
     cordic_exp.in_z := new_fcord_in
 
-    val exp_norm = !cordic_exp.out_expz(bw-2)
-    val final_mant = Mux(exp_norm, cordic_exp.out_expz(bw-4, bw-mantissa-3), cordic_exp.out_expz(bw-3, bw-mantissa-2))
+    // --- Output normalization ---
+    // CORDIC output is e^(f*ln2) = 2^f in fixed-point with cordic_fbits fractional bits
+    // Since f is in [0,1), the result is in [1.0, 2.0), so the integer bit (at position cordic_fbits)
+    // should be 1. If it's 0 due to CORDIC gain imprecision, we normalize by shifting left 1 bit.
+    val cordic_int_bit = cordic_fbits // = bw - 2, position of the integer '1' in CORDIC output
+    val exp_norm = !cordic_exp.out_expz(cordic_int_bit)
+    // Extract mantissa bits from CORDIC output, skipping the implicit leading 1
+    val final_mant = Mux(exp_norm,
+      cordic_exp.out_expz(cordic_int_bit - 2, cordic_int_bit - mantissa - 1),  // normalized: shift left 1
+      cordic_exp.out_expz(cordic_int_bit - 1, cordic_int_bit - mantissa))      // standard extraction
     val final_exp = FORMAT.bias.U(exponent.W) + sr_w_fy - exp_norm.asUInt
-    val final_sign = 0.U(1.W)
+    val final_sign = 0.U(1.W) // e^x > 0 for all real x
 
     io.out_valid := cordic_exp.out_valid
     io.out_data := final_sign ## final_exp ## final_mant
