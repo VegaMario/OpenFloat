@@ -8,11 +8,6 @@ OpenFloat is a parameterized floating-point unit (FPU) design generator develope
 
 OpenFloat provides a library of highly configurable floating-point arithmetic modules that support multiple IEEE 754 precision formats. The design emphasizes:
 
-- **Parameterized bit-widths**: Support for 16-bit (half), 32-bit (single), 64-bit (double), and 128-bit (quad) precision
-- **Configurable pipeline depths**: Trade-off between latency and throughput based on application requirements
-- **Standard ready-valid handshaking**: All modules implement AXI-Stream style flow control for easy integration
-- **Iterative algorithms**: CORDIC-based implementations for trigonometric and transcendental functions
-
 ## Project Structure
 
 ```
@@ -32,14 +27,19 @@ OpenFloat/
 └── README.md                   # This file
 ```
 
-## Supported IEEE 754 Formats (code can be modified to any format)
+## Supported Floating-Point Formats
 
-| Format | Total Bits | Sign | Exponent | Mantissa | Bias |
-|--------|------------|------|----------|----------|------|
-| Half   | 16         | 1    | 5        | 10       | 15   |
-| Single | 32         | 1    | 8        | 23       | 127  |
-| Double | 64         | 1    | 11       | 52       | 1023 |
-| Quad   | 128        | 1    | 15       | 112      | 16383|
+OpenFloat supports standard IEEE 754 formats, BFloat16, and custom formats via the `FloatingPointFormat` trait.
+
+| Format | Object | Total Bits | Sign | Exponent | Mantissa | Bias |
+|--------|--------|------------|------|----------|----------|------|
+| Half | `FP16` | 16 | 1 | 5 | 10 | 15 |
+| BFloat16 | `BF16` | 16 | 1 | 8 | 7 | 127 |
+| Single | `FP32` | 32 | 1 | 8 | 23 | 127 |
+| Double | `FP64` | 64 | 1 | 11 | 52 | 1023 |
+| Quad | `FP128` | 128 | 1 | 15 | 112 | 16383|
+
+You can also define arbitrary custom formats using `CustomFormat(exponent, mantissa)`.
 
 ## Floating-Point Modules
 
@@ -47,27 +47,27 @@ OpenFloat/
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_add` | Floating-point addition | `bw`: bit-width, `pd`: pipeline depth (1, 3, 7, 10, 11, 13) |
-| `FP_mult` | Floating-point multiplication | `bw`: bit-width, `pd`: pipeline depth (1, 3, 7, 8, 10, 13) |
-| `FP_div` | Digit-recurrence division | `bw`: bit-width, `L`: iterations, `latency`: pipeline stages |
-| `FP_sqrt` | Digit-recurrence square root | `bw`: bit-width, `L`: iterations, `latency`: pipeline stages |
+| `FP_add` | Floating-point addition | `FORMAT`: FloatingPointFormat, `pd`: pipeline depth (1, 3, 7, 10, 11, 13) |
+| `FP_mult` | Floating-point multiplication | `FORMAT`: FloatingPointFormat, `pd`: pipeline depth (1, 3, 7, 8, 10, 13) |
+| `FP_div` | Digit-recurrence division | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
+| `FP_sqrt` | Digit-recurrence square root | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
 
 ### Transcendental Functions
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_cos` | Cosine and Sine (CORDIC-based) | `bw`: bit-width, `iters`: CORDIC iterations |
-| `FP_atan` | Arctangent (CORDIC-based) | `bw`: bit-width, `iters`: CORDIC iterations |
-| `FP_exp` | Exponential function (e^x) | `bw`: bit-width |
+| `FP_cos` | Cosine and Sine (CORDIC-based) | `FORMAT`: FloatingPointFormat, `iters`: CORDIC iterations |
+| `FP_atan` | Arctangent (CORDIC-based) | `FORMAT`: FloatingPointFormat, `iters`: CORDIC iterations |
+| `FP_exp` | Exponential function (e^x) | `FORMAT`: FloatingPointFormat |
 
 ### Utility Modules
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_acc` | Floating-point accumulator | `bw`: bit-width, `iters`: accumulation count, format params |
-| `FP_floor` | Floor function | `bw`: bit-width |
-| `FloatTOFixed` | Float to fixed-point conversion | `bw`: bit-width, `ibits`: integer bits, `fbits`: fractional bits |
-| `FixedTOFloat` | Fixed-point to float conversion | `bw`: bit-width, `ibits`: integer bits, `fbits`: fractional bits |
+| `FP_acc` | Floating-point accumulator | `FORMAT`: FloatingPointFormat, `iters`: accumulation count, `ExpExp`, `ExpMSB`, `LSB` |
+| `FP_floor` | Floor function | `FORMAT`: FloatingPointFormat |
+| `FloatTOFixed` | Float to fixed-point conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
+| `FixedTOFloat` | Fixed-point to float conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 
 ## Primitive Modules
 
@@ -146,8 +146,9 @@ object generate extends App {
   }
 
   // Generate desired module
-  genVerilog(new FP_mult(32, 7))  // 32-bit multiplier with 7-stage pipeline
-  genVerilog(new FP_div(64, 52, 52))  // 64-bit divider
+  // Import the formats first: import FloatingPoint.{FP32, FP64, BF16}
+  genVerilog(new FP_mult(FP32, 7))  // 32-bit multiplier with 7-stage pipeline
+  genVerilog(new FP_div(FP64, ...))  // 64-bit divider
 }
 ```
 
@@ -157,10 +158,11 @@ Generated SystemVerilog files will be placed in the project root directory.
 
 ### Floating-Point Adder
 ```scala
+import FloatingPoint._
 import FloatingPoint.fpu._
 
 // 32-bit adder with 7-stage pipeline
-val adder = Module(new FP_add(bw = 32, pd = 7))
+val adder = Module(new FP_add(FORMAT = FP32, pd = 7))
 adder.io.out_ready := true.B
 adder.io.in_valid := input_valid
 adder.io.in_a := operand_a
@@ -172,7 +174,7 @@ val result_valid = adder.io.out_valid
 ### Floating-Point Divider
 ```scala
 // 32-bit divider with 23 iterations and 23-cycle latency
-val divider = Module(new FP_div(bw = 32, L = 23, latency = 23))
+val divider = Module(new FP_div(FORMAT = FP32, L = 23, latency = 23))
 divider.io.out_ready := downstream_ready
 divider.io.in_valid := input_valid
 divider.io.in_a := dividend
@@ -183,7 +185,7 @@ val quotient = divider.io.out_s
 ### CORDIC Cosine/Sine
 ```scala
 // 32-bit cos/sin with 23 CORDIC iterations
-val trig = Module(new FP_cos(bw = 32, iters = 23))
+val trig = Module(new FP_cos(FORMAT = FP32, iters = 23))
 trig.io.out_ready := true.B
 trig.io.in_valid := angle_valid
 trig.io.in_angle := angle_ieee754
