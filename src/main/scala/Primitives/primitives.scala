@@ -144,7 +144,10 @@ object primitives {
     val b_aux_pipeline = b_aux_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2)).toArray
     val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2)).toArray
 
-    io.out_valid := result_pipeline.last.valid
+    val lastPipeIndex = pipe_map.lastIndexWhere(_ > 0)
+
+    io.out_valid := result_pipeline(lastPipeIndex).valid
+//    io.out_valid := result_pipeline.last.valid
     io.out_s := result_pipeline.last.bits
     io.out_r  := a_aux_pipeline.last.bits
     // Ready when pipeline can advance
@@ -219,7 +222,8 @@ object primitives {
     shifted_ones.zipWithIndex.foreach(x=> x._1 := (one >> (x._2 + 1)))
     val shifted_ps = Wire(Vec(L-1, UInt((bw*2+1).W)))
     shifted_ps.zipWithIndex.foreach(x=>x._1 := (P_pipeline(x._2).bits >> (x._2+1)))
-    io.out_valid := result_pipeline.last.valid
+    val lastPipeIndex = pipe_map.lastIndexWhere(_ > 0)
+    io.out_valid := result_pipeline(lastPipeIndex).valid
     io.out_s := result_pipeline.last.bits
     val in = (io.in_a ## 0.U(bw.W)) - one
     // Ready when pipeline can advance
