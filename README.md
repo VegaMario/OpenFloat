@@ -66,7 +66,7 @@ You can also define arbitrary custom formats using `CustomFormat(exponent, manti
 | Module | Description | Parameters |
 |--------|-------------|------------|
 | `FP_acc` | Floating-point accumulator | `FORMAT`: FloatingPointFormat, `iters`: accumulation count, `ExpExp`, `ExpMSB`, `LSB` |
-| `FP_floor` | Floor function | `FORMAT`: FloatingPointFormat |
+| `FP_floor` | Floor function with dual outputs: integer part (`out_whole`) and fractional part (`out_frac`). Useful as a range reduction building block (e.g., used by `FP_cos`). | `FORMAT`: FloatingPointFormat |
 | `FloatTOFixed` | Float to fixed-point conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 | `FixedTOFloat` | Fixed-point to float conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 
@@ -87,7 +87,7 @@ The `Primitives` package provides low-level building blocks:
 | `divider` | Digit-recurrence integer divider (pipelined) |
 | `frac_sqrt` | Fractional square root for normalized numbers |
 | `cordic` | Fixed-point CORDIC processor (rotation/vectoring modes) |
-| `ucordic` | Universal CORDIC (circular, linear, hyperbolic modes) |
+| `ucordic` | Universal CORDIC with runtime mode selection (`ctrl_mode`, `ctrl_vectoring`). A single instance can compute cos, sin, atan, multiply, divide, sinh, cosh, atanh, exp, and ln. Supports **circular** (mu=1), **linear** (mu=0), and **hyperbolic** (mu=-1) modes in both rotation and vectoring. Correctly implements hyperbolic iteration index repetition (indices 4, 13, 40, 121) for convergence. |
 | `cos`, `atan`, `exp` | Fixed-point trigonometric/exponential wrappers |
 
 ## Software Conversion Utilities
@@ -163,7 +163,7 @@ object generate extends App {
 
   // Generate desired module
   // Import the formats first: import FloatingPoint.{FP32, FP64, BF16}
-  genVerilog(new FP_mult(FP32, 7))  // 32-bit multiplier with 7-stage pipeline
+  genVerilog(new FP_exp(FP32))  // 32-bit exponential unit
 }
 ```
 
@@ -221,12 +221,20 @@ Trigonometric and hyperbolic functions use the CORDIC algorithm, which computes 
 - **Hyperbolic mode** (mu = -1): sinh, cosh, atanh, exp, ln
 
 ### Exponential (e^x)
-`FP_exp` uses range reduction to decompose `x / ln(2) = w + f` into an integer part `w` and fractional part `f`. The fractional part is computed via a hyperbolic CORDIC engine (`e^(f * ln(2)) = 2^f`), while the integer part becomes an exponent bias adjustment. Constant multiplications by `ln(2)` and `1/ln(2)` are implemented using Canonical Signed Digit (CSD) encoding for multiplierless shift-and-add operations.
+`FP_exp` uses range reduction to decompose `x / ln(2) = w + f` into an integer part `w` and fractional part `f`. The fractional part is computed via a hyperbolic CORDIC engine (`e^(f * ln(2)) = 2^f`), while the integer part becomes an exponent bias adjustment.
+
+#### Multiplierless CSD Constant Multiplication
+Constant multiplications by `ln(2)` and `1/ln(2)` are implemented using **Canonical Signed Digit (CSD) encoding**, which decomposes fixed-point constants into a minimal set of shift-and-add/subtract operations — eliminating the need for hardware multipliers. The CSD algorithm guarantees no two consecutive non-zero digits, minimizing the number of additions/subtractions required. This is a significant area optimization for ASIC and FPGA targets, as it replaces wide multipliers with a small number of barrel shifts and adders.
+
+The `ln(2)` and `1/ln(2)` constants are specified with over 300 decimal digits of precision, sufficient to support all standard formats through FP128 (112-bit mantissa) without loss of accuracy from constant truncation.
 
 ### Overflow/Underflow Handling
 All modules implement saturation arithmetic:
 - **Overflow**: Result saturates to maximum representable value
 - **Underflow**: Result saturates to minimum normalized value
+
+#### Input Saturation
+All FPU modules clamp input exponents to the `[min_exp, max_exp]` range at the input stage, preventing undefined behavior for out-of-range or special values. `FP_exp` further narrows the accepted input range (capping at `bias + exponent - 2` and flooring at `bias - mantissa`) to avoid catastrophic overflow or underflow of the exponential output.
 
 ## License
 
