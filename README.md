@@ -27,7 +27,8 @@ OpenFloat/
 │   ├── RoundingSpec.scala      # FP_add / FP_mult vs correctly-rounded FP64
 │   ├── DivSqrtSpec.scala       # FP_div / FP_sqrt vs correctly-rounded FP64
 │   ├── TranscendentalSpec.scala# FP_cos / FP_atan / FP_exp accuracy (avg & max error)
-│   └── CordicCoreSpec.scala    # cordic / ucordic core cos/sin accuracy
+│   ├── CordicCoreSpec.scala    # cordic / ucordic core cos/sin accuracy
+│   └── FP_accSpec.scala        # FP_acc exactness vs BigDecimal sum + control tests
 ├── build.sbt                   # SBT build configuration
 ├── LICENSE                     # BSD-style license
 └── README.md                   # This file
@@ -82,7 +83,7 @@ See [Precision and Rounding](#precision-and-rounding) for details.
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_acc` | Floating-point accumulator | `FORMAT`: FloatingPointFormat, `iters`: accumulation count, `ExpExp`, `ExpMSB`, `LSB` |
+| `FP_acc` | Fixed-point (Kulisch-style) streaming accumulator. Sums terms **exactly** in a wide signed two's-complement register and rounds-to-nearest-even only once, at the final normalization. Supports `in_last`/`clear` streaming control and reports `out_inexact`/`out_overflow`. | `FORMAT`: FloatingPointFormat, `maxExp`/`minExp`: supported unbiased exponent range, `iters`: default batch length |
 | `FP_floor` | Floor function with dual outputs: integer part (`out_whole`) and fractional part (`out_frac`). Useful as a range reduction building block (e.g., used by `FP_cos`). Correctly handles negative exact integers (where `floor(x) == x`). | `FORMAT`: FloatingPointFormat |
 | `FloatTOFixed` | Float to fixed-point conversion. Carries guard bits through the alignment shift and rounds-to-nearest-even (with a sticky bit), instead of truncating. | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 | `FixedTOFloat` | Fixed-point to float conversion. Rounds-to-nearest-even when extracting the mantissa (with carry-out exponent bump), instead of truncating. | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
@@ -256,12 +257,23 @@ Constant multiplications by `ln(2)` and `1/ln(2)` are implemented using **Canoni
 
 The `ln(2)` and `1/ln(2)` constants are specified with over 300 decimal digits of precision, sufficient to support all standard formats through FP128 (112-bit mantissa) without loss of accuracy from constant truncation. The constants are rounded-to-nearest when scaled to fixed point, and the `>> scale` descale after each CSD multiply also rounds-to-nearest rather than truncating.
 
+### Accumulation (Kulisch-style)
+`FP_acc` is a **fixed-point exact accumulator** rather than a chain of floating-point adds. Each input is converted to a wide *signed two's-complement* fixed-point value and added into a running register that is sized to hold every in-range term — and the partial sums — without loss. Because the additions are exact, the result is independent of summation order and free of the catastrophic cancellation that plagues naive same-order floating-point summation. Rounding (RNE, with guard/round/sticky) happens exactly once, when the final sum is normalized back to the IEEE output.
+
+The fixed-point geometry is derived from the requested dynamic range:
+- `fracBits = (maxExp - minExp) + mantissa` — keeps the smallest supported term's full mantissa
+- `headroom = ceil(log2(iters)) + 1` — carry-growth bits so summing `iters` terms cannot overflow
+- the accumulator is `headroom + (mantissa+1) + fracBits + 1` bits (the `+1` is the sign)
+
+Streaming control: assert `in_last` with the final term of a batch to emit the result and clear the register, or assert `clear` to discard the running sum. The fixed `iters` parameter still acts as a default flush length. `out_inexact` flags a rounded (or saturated) result, and `out_overflow` flags a result beyond the format's range.
+
 ### Precision and Rounding
 Every lossy step in the datapath rounds-to-nearest (rather than truncating toward zero) and carries guard/round/sticky information so error does not accumulate or bias:
 
 - **`FP_add`, `FP_mult`, `FP_div`, `FP_sqrt`** carry guard + round + sticky bits below the mantissa and apply IEEE **round-to-nearest-even (RNE)**. They are bit-exact correctly-rounded against a software FP64 reference.
 - **`FloatTOFixed` / `FixedTOFloat`** round-to-nearest-even when aligning/extracting (with sticky capture), instead of truncating.
 - **`cordic` / `ucordic`** carry internal fractional guard bits and round the result back to `fbits`.
+- **`FP_acc`** accumulates exactly in fixed point and rounds-to-nearest-even once, at the final normalization.
 - **Constant tables and gains** are generated at high precision (`hpmath`, BigDecimal) and rounded-to-nearest.
 
 As a result the transcendental units (`FP_cos`, `FP_atan`, `FP_exp`) track the software (CPU) FP64 results to within a few ULP across the full input range; the underlying CORDIC cores reproduce software cos/sin to the limit of the fixed-point representation.
@@ -286,10 +298,13 @@ output against a software FP64 reference.
 | `DivSqrtSpec` | `FP_div`, `FP_sqrt` | exact bit-pattern mismatches, off-by-1-ULP count, avg/max relative & absolute error |
 | `TranscendentalSpec` | `FP_cos`, `FP_atan`, `FP_exp` | avg/max relative & absolute error vs `Math.cos`/`sin`/`atan`/`exp` |
 | `CordicCoreSpec` | `cordic`, `ucordic` | per-input cos/sin error for the raw CORDIC cores |
+| `FP_accSpec` | `FP_acc` | avg/max relative error vs a BigDecimal exact sum, a small-vs-large stress case, and `clear` control |
 
 The basic arithmetic specs (`RoundingSpec`, `DivSqrtSpec`) expect **zero** mismatches —
 the hardware is bit-exact correctly-rounded against the FP64 reference. The transcendental
-specs print average and maximum error so precision can be tracked over time.
+specs print average and maximum error so precision can be tracked over time. `FP_accSpec`
+compares against a `BigDecimal` exact sum (rounded once to the format), confirming the
+accumulator stays within ~1 ULP even for mixed large/small magnitude inputs.
 
 Run all suites:
 
@@ -304,6 +319,7 @@ sbt "testOnly TB.RoundingSpec"
 sbt "testOnly TB.DivSqrtSpec"
 sbt "testOnly TB.TranscendentalSpec"
 sbt "testOnly TB.CordicCoreSpec"
+sbt "testOnly TB.FP_accSpec"
 ```
 
 ## License
