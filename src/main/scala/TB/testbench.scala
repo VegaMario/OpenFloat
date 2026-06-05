@@ -54,7 +54,7 @@ object testbench extends App {
 
       val inputs = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
       val inputs2 = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
-      val expected_outputs = inputs.zip(inputs2).map(i=>i._1.bigDecimal.divide(i._2.bigDecimal, MathContext.DECIMAL32))
+      val expected_outputs = inputs.zip(inputs2).map(i=>i._1.bigDecimal.divide(i._2.bigDecimal, MathContext.DECIMAL64))
       val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
       val hardware_inputs2 = inputs2.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
       val observed_output = Array.fill(runs)(BigDecimal(0))
@@ -353,7 +353,7 @@ object testbench extends App {
 
   // run test
 //  runTest(new BasicTest(FP32))
-//  runTest(new SQRT_TEST(FP64))
+  runTest(new SQRT_TEST(FP64))
 // runTest(new SQRT_TESTv2)
 //  runTest(new DIV_TEST(FP32))
 //  runTest(new EXP_TEST(FP32))

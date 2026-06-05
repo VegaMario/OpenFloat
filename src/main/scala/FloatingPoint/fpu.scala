@@ -2,7 +2,7 @@ package FloatingPoint
 import Primitives.primitives._
 import Primitives.convert._
 import chisel3._
-import chisel3.util.{Counter, ShiftRegister, log2Ceil}
+import chisel3.util.{ShiftRegister, log2Ceil}
 
 object fpu {
 
@@ -573,171 +573,240 @@ object fpu {
     io.out_s := norm_out_sign ## norm_out_exp ## norm_out_frac
   }
 
-  class FP_acc(FORMAT: FloatingPointFormat, iters: Int, ExpExp: Int, ExpMSB: Int, LSB: Int) extends FPModule(FORMAT) {
-    require(LSB >= mantissa)
-    require(ExpMSB >= 1)
-    val io = IO(new Bundle() {
-      val in_ready = Output(Bool())
-      val out_ready = Input(Bool())
-      val in_valid = Input(Bool())
-      val in_a = Input(UInt(bw.W))
-      val out_s = Output(UInt(bw.W))
-      val out_valid = Output(Bool())
-    })
-    override def desiredName = s"${FORMAT}_acc"
+  // Fixed-point (Kulisch-style) streaming accumulator.
+  //
+  // Each floating-point input is converted to a wide *signed two's-complement*
+  // fixed-point value and added into an accumulator register. Because the register is
+  // sized to hold every in-range term exactly (and given carry headroom for the sum),
+  // the accumulation itself is EXACT -- rounding happens only once, when the final sum
+  // is normalized back to the IEEE output. This avoids the per-add rounding error and
+  // loss of associativity that plague a chain of FP_add's.
+  //
+  // Parameters (the dynamic range is expressed in *unbiased* exponents):
+  //   maxExp - largest unbiased input exponent to support exactly (e.g. 10 => ~2^11)
+  //   minExp - smallest unbiased input exponent to support exactly (e.g. -10 => ~2^-10)
+  //   iters  - number of terms accumulated per result (default streaming length)
+  //
+  // Derived fixed-point layout (magnitude), from MSB to LSB:
+  //   [ headroom | (mantissa+1) significand of the largest term | fracBits ]
+  //   - fracBits = (maxExp - minExp) + mantissa : keeps the smallest term's full mantissa
+  //   - headroom = ceil(log2(iters)) + 1        : growth room so the sum can't overflow
+  //   plus one sign bit on top for two's-complement (accW bits total).
+  // The unit weight 2^0 sits at bit (fracBits); a term with unbiased exponent e has its
+  // hidden-one bit at (fracBits + e).
+  class FP_acc(FORMAT: FloatingPointFormat, maxExp: Int, minExp: Int, iters: Int) extends FPModule(FORMAT) {
+    require(maxExp >= minExp, "maxExp must be >= minExp")
+    require(iters >= 1, "iters must be >= 1")
 
-    val ResultRegWidth = Math.pow(2, log2Ceil(ExpMSB + LSB)).toInt
+    val io = IO(new Bundle() {
+      val in_ready  = Output(Bool())
+      val out_ready = Input(Bool())
+      val in_valid  = Input(Bool())
+      val in_a      = Input(UInt(bw.W))
+      val in_last   = Input(Bool())  // assert with the final term of a batch to flush + clear
+      val clear     = Input(Bool())  // synchronous clear of the running sum
+      val out_s     = Output(UInt(bw.W))
+      val out_valid = Output(Bool())
+      val out_inexact  = Output(Bool()) // final normalization dropped non-zero bits
+      val out_overflow = Output(Bool()) // result exceeded the format's max normal
+    })
+    override def desiredName = s"${FORMAT}_acc_${maxExp}_${minExp}_${iters}"
+
+    // --- Derived fixed-point geometry ---
+    private val span     = maxExp - minExp
+    private val fracBits = span + mantissa                 // resolution below the unit point
+    private val headroom = log2Ceil(iters) + 1             // carry growth bits for the running sum
+    private val magW     = headroom + (mantissa + 1) + fracBits // magnitude bits
+    private val accW     = magW + 1                        // + sign bit (two's complement)
+    // Bit position (within the magnitude) of the unbiased-exponent-0 unit weight.
+    private val unitPos  = fracBits
+    // The largest term's hidden-1 sits at magnitude bit hiPos; require it has room for the
+    // whole significand below it (hiPos - mantissa >= 0).
+    private val hiPos    = fracBits + maxExp
+    require(hiPos - mantissa >= 0, "maxExp/minExp window too small for the significand")
+
+    // Biased reference exponent for the largest term we represent exactly.
+    private val maxExpBiased = (BigInt(maxExp) + FORMAT.bias).toInt
+
+    // 10 logical pipeline stages, distributed automatically across `latency` registers,
+    // matching the pattern used by FP_add / FP_mult.
+    // Fixed pipeline here (combinational align + 1 accumulate); the side delays below keep
+    // valid/sign/control aligned with the datapath.
 
     // Pipeline enable: advance when output is consumed or no valid output
     val pipe_enable = io.out_ready || !io.out_valid
-
-    // Ready when pipeline can advance
     io.in_ready := pipe_enable
 
-    // --------------------------------------------------------------
+    // -------- Stage 0: register input, split fields --------
+    val s0_valid = ShiftRegister(io.in_valid && io.in_ready, 1, pipe_enable)
+    val s0_last  = ShiftRegister(io.in_last  && io.in_valid && io.in_ready, 1, pipe_enable)
+    val s0_clear = ShiftRegister(io.clear, 1, pipe_enable)
+    val input_a  = ShiftRegister(io.in_a, 1, pipe_enable)
 
-    val input_a = ShiftRegister(io.in_a, 1, pipe_enable) // store in input a
+    val sign_wire = input_a(bw - 1)
+    val exp_in    = input_a(bw - 2, mantissa)
+    val frac_in   = 1.U(1.W) ## input_a(mantissa - 1, 0) // 1.f significand (mantissa+1 bits)
 
+    // -------- Align the significand into the fixed-point magnitude --------
+    // A term with unbiased exponent e has its hidden-1 bit at magnitude position
+    //   unitPos + e = fracBits + e.
+    // Pre-place 1.f for the largest supported term (e = maxExp): its hidden-1 sits at
+    //   hiPos = fracBits + maxExp, and the significand spans [hiPos : hiPos-mantissa].
+    // Then right-shift by (maxExpBiased - exp_in) to align an arbitrary term. This avoids
+    // variable left shifts and keeps the binary point fixed.
+    // frac_in (mantissa+1 bits) left-justified so its MSB lands at hiPos within magW bits.
+    val placed = (frac_in.pad(magW) << (hiPos - mantissa))(magW - 1, 0)
 
-    // max and min values for saturating use
-    val max_expected_exp = (ExpExp.U(exponent.W) + bias - 1.U) // reference value for aligning input a (we expect the input to be smaller than this value)
+    // Right shift amount to align this term relative to the largest representable term.
+    // Clamp so out-of-range-small inputs fold into a sticky rather than wrapping the shifter.
+    val shiftAmtW = log2Ceil(magW + 1)
+    val rawShift  = (maxExpBiased.S((exponent + 2).W) - exp_in.zext) // signed; <0 only if exp_in > maxExpBiased
+    val tooBig    = rawShift < 0.S                                   // input exponent above maxExp window
+    val shiftSat  = Mux(tooBig, 0.U(shiftAmtW.W),
+                     Mux(rawShift > magW.S, magW.U(shiftAmtW.W), rawShift(shiftAmtW - 1, 0)))
+    val aligned_mag = (placed >> shiftSat)(magW - 1, 0)
+    // Sticky: any 1 shifted out below the LSB of the magnitude (precision lost on tiny terms).
+    val align_sticky = (placed & ((1.U((magW + 1).W) << shiftSat) - 1.U))(magW - 1, 0).orR
+    // Overflow if an input exponent exceeds the configured window (cannot be represented).
+    val in_overflow  = tooBig && frac_in.orR
 
-    // get the sign bit
-    val sign_wire = Wire(UInt(1.W))
-    sign_wire := input_a(bw - 1)
+    // Convert to signed two's-complement: negate the magnitude if the input is negative.
+    val signed_term = Mux(sign_wire, -(aligned_mag.zext), aligned_mag.zext).asSInt // (magW+1)-bit signed
 
+    // -------- Stage 1: accumulate (true two's-complement add) --------
+    val s1_valid  = ShiftRegister(s0_valid, 1, pipe_enable)
+    val s1_last   = ShiftRegister(s0_last, 1, pipe_enable)
+    val s1_clear  = ShiftRegister(s0_clear, 1, pipe_enable)
+    val s1_term   = ShiftRegister(signed_term, 1, pipe_enable)
+    val s1_sticky = ShiftRegister(align_sticky || in_overflow, 1, pipe_enable)
+    val s1_inovf  = ShiftRegister(in_overflow, 1, pipe_enable)
 
-    // get the exponent and mantissa and saturate
-    val exp_wire = Wire(UInt(exponent.W))
-    val frac_wire = Wire(UInt((mantissa + 1).W))
-    when(input_a(bw - 2, mantissa) > max_expected_exp) {
-      exp_wire := max_expected_exp
-      frac_wire := max_frac
-    }.elsewhen(input_a(bw-2,mantissa) < min_exp){
-      exp_wire := min_exp
-      frac_wire := min_frac
-    }.otherwise {
-      exp_wire := input_a(bw - 2, mantissa)
-      frac_wire := 1.U ## input_a(mantissa - 1, 0)
-    }
+    val acc      = RegInit(0.S(accW.W))        // running sum (two's complement)
+    val acc_sticky = RegInit(false.B)          // OR of all alignment-lost bits so far
+    val acc_ovf  = RegInit(false.B)            // saturating-add overflow latch
 
+    // Sign-extend both operands to accW and add. Detect overflow beyond the magnitude range.
+    val sum_full = (acc +& s1_term.pad(accW))         // (accW+1)-bit signed result
+    val sum_acc  = sum_full(accW - 1, 0).asSInt
+    val add_ovf  = (sum_full(accW) =/= sum_full(accW - 1)) || s1_inovf // signed overflow out of accW
 
+    // counter for the default (fixed-length) flush, plus in_last for streaming control
+    val cnt_iter = RegInit(0.U(log2Ceil(iters + 1).W))
+    val flush_now = s1_valid && (s1_last || (cnt_iter === (iters - 1).U))
 
-    // converting fractional part into internal format
-    val whole_frac_wire = Wire( UInt((ExpMSB+LSB).W))
-    whole_frac_wire := (0.U((ExpMSB - 1).W)) ## frac_wire ## (0.U((LSB - mantissa).W))
+    // Registers carrying the frozen sum into the normalization pipeline.
+    val norm_start = RegInit(false.B)
+    val norm_acc   = RegInit(0.S(accW.W))
+    val norm_sticky = RegInit(false.B)
+    val norm_ovf    = RegInit(false.B)
 
-
-    // find the difference between exponents, we use this to right shift the input value for proper alignment
-    val exp_subtractor = Module(new full_subtractor(exponent))
-    exp_subtractor.io.in_a := max_expected_exp
-    exp_subtractor.io.in_b := exp_wire
-    exp_subtractor.io.in_c := 0.U
-
-    // --------------------------------------------------------------
-
-    // then the shifting on the input mantissa is performed
-    val shifted_frac = (ShiftRegister(whole_frac_wire,1,pipe_enable) >> ShiftRegister(exp_subtractor.io.out_s,1,pipe_enable)).asUInt
-
-    // --------------------------------------------------------------
-
-    // take 1s complement of shifted frac in case it is negative
-    val inv_shif_frac = (~ShiftRegister(shifted_frac,1,pipe_enable)).asUInt
-
-    // if negative , we consider the 1s complemented frac else the normal one
-    val frac_add_adjusted = Mux(ShiftRegister(sign_wire,2,pipe_enable).asBool, inv_shif_frac,ShiftRegister(shifted_frac,1,pipe_enable))
-
-    // --------------------------------------------------------------
-
-    // internally stored result for accumulation results
-    val acc_sign = RegInit(0.U)
-    val acc_wfrac = RegInit(0.U((ResultRegWidth).W))
-
-    val inp_sign = ShiftRegister(sign_wire, 3, pipe_enable)
-
-    // compare signs of internal result and the input sign
-    val diff_sign = (acc_sign ^ inp_sign)
-
-    // add the internal result with the aligned input
-    val frac_adder = Module(new full_adder(ExpMSB + LSB)).io
-    frac_adder.in_a := acc_wfrac
-    frac_adder.in_b := ShiftRegister(frac_add_adjusted, 1, pipe_enable)
-    frac_adder.in_c := inp_sign // take into account the input sign, which will basically twos complement the second input if negative. Resulting in a subtraction from addition
-
-    // if the signs were different and we had no carry, then it is implied that the internal sign should invert
-    //    val new_sign = Mux(diff_sign === 1.U, Mux(frac_adder.out_c.asBool, acc_sign, !acc_sign), acc_sign)
-    val new_sign = Mux(diff_sign === 1.U, Mux(inp_sign === 1.U, Mux(!frac_adder.out_c.asBool, !acc_sign, acc_sign), Mux(frac_adder.out_c.asBool, !acc_sign, acc_sign)), acc_sign)
-
-    // these regs are just for carrying over the results into normalization after all accumulation iterations are complete
-    val temp_sign = RegInit(false.B)
-    val temp_frac = RegInit(0.U((ResultRegWidth).W))
-
-    // counter of iterations and a register for indicating output validity
-    val cnt_iter = new Counter(iters)
-    val out_valid = RegInit(false.B)
-
-    // count the iters and update internal result register accordingly
-    when(pipe_enable && ShiftRegister(io.in_valid && io.in_ready, 4, pipe_enable)){
-      cnt_iter.inc()
-      when( cnt_iter.value === (iters-1).U){ // if all iterations are done
-        acc_sign := 0.U // clear accumulation registers
-        acc_wfrac := 0.U
-        out_valid := true.B // activate sequence for valid output
-        temp_sign := new_sign // push data to temp registers for normalization
-        temp_frac := frac_adder.out_s
-      }.otherwise{
-        out_valid := false.B
-        acc_sign := new_sign
-        acc_wfrac := frac_adder.out_s
+    when(pipe_enable) {
+      norm_start := false.B
+      when(s1_clear) {
+        acc := 0.S; acc_sticky := false.B; acc_ovf := false.B; cnt_iter := 0.U
+      }.elsewhen(s1_valid) {
+        val nextAcc    = sum_acc
+        val nextSticky = acc_sticky || s1_sticky
+        val nextOvf    = acc_ovf || add_ovf
+        when(flush_now) {
+          // Emit the accumulated sum and reset for the next batch.
+          norm_start  := true.B
+          norm_acc    := nextAcc
+          norm_sticky := nextSticky
+          norm_ovf    := nextOvf
+          acc := 0.S; acc_sticky := false.B; acc_ovf := false.B; cnt_iter := 0.U
+        }.otherwise {
+          acc := nextAcc; acc_sticky := nextSticky; acc_ovf := nextOvf
+          cnt_iter := cnt_iter + 1.U
+        }
       }
     }
 
-    // --------------------------------------------------------------
+    // -------- Stage 2: magnitude + leading-zero detection --------
+    val n2_start  = ShiftRegister(norm_start, 1, pipe_enable)
+    val n2_acc    = ShiftRegister(norm_acc, 1, pipe_enable)
+    val n2_sticky = ShiftRegister(norm_sticky, 1, pipe_enable)
+    val n2_ovf    = ShiftRegister(norm_ovf, 1, pipe_enable)
 
-    // take 2s complement of temp frac reg value in case of negativity
-    val tfrac_sr = ShiftRegister(temp_frac, 1, pipe_enable)
-    val two_comp_temp_frac = (~tfrac_sr(ExpMSB+LSB-1,0)).asUInt + 1.U
-    // if temp sign is negative, take the 2s complemented result
-    val lzc_in = Mux(ShiftRegister(temp_sign, 1, pipe_enable), two_comp_temp_frac, tfrac_sr)
+    val res_sign = n2_acc(accW - 1)
+    val res_mag  = Mux(res_sign, (-n2_acc)(magW - 1, 0), n2_acc(magW - 1, 0)) // magnitude (magW bits)
 
-    // --------------------------------------------------------------
+    private val padW = 1 << log2Ceil(magW)
+    val lzc = Module(new LZC(padW, 2)).io
+    lzc.in_d := res_mag.pad(padW)
 
-    // pass the temp_frac value over to the leading zero counter
-    val LZC_inst = Module(new LZC(ResultRegWidth,2)).io
-    LZC_inst.in_d := ShiftRegister(lzc_in, 1, pipe_enable)
+    // Register the magnitude and the leading-zero count together into stage 3.
+    val n3_start  = ShiftRegister(n2_start, 1, pipe_enable)
+    val n3_sign   = ShiftRegister(res_sign, 1, pipe_enable)
+    val n3_mag    = ShiftRegister(res_mag, 1, pipe_enable)
+    val n3_lz     = ShiftRegister(lzc.out_c, 1, pipe_enable)
+    val n3_sticky = ShiftRegister(n2_sticky, 1, pipe_enable)
+    val n3_ovf    = ShiftRegister(n2_ovf, 1, pipe_enable)
 
-    // --------------------------------------------------------------
-    // compute where the index for the leading one is
-    val leadzeroindex = (ResultRegWidth - 1).U - ShiftRegister(LZC_inst.out_c, 1, pipe_enable)
-    // there are two possible shifts for normalization
-    val sleft = ShiftRegister(lzc_in, 2, pipe_enable) << (LSB.U - leadzeroindex) // shift left in case index is below LSB
-    val sright = ShiftRegister(lzc_in, 2, pipe_enable) >> (leadzeroindex - LSB.U) // shift right in case index is above LSB
-    val red = max_expected_exp -& (LSB.U - leadzeroindex) // subtract from exp in case index is below LSB
-    val inc = max_expected_exp +& (leadzeroindex - LSB.U) // add to exp in case index is above LSB
-    // final step is to check for overflows/underflows
-    val adj_frac = Mux(leadzeroindex > (LSB).U, // for mantissa
-      Mux(inc(exponent) || (inc > max_exp), max_frac,sright), // overflow
-      Mux(red(exponent) || (red < min_exp), min_frac,sleft)) // underflow
-    val adj_exp = Mux(leadzeroindex > (LSB).U, // for exponent
-      Mux(inc(exponent) || (inc > max_exp), max_exp,inc), // overflow
-      Mux(red(exponent) || (red < min_exp), min_exp,red)) // underflow
+    // -------- Stage 3: normalize, round-to-nearest-even, repack --------
+    // Padding adds zeros above the MSB, so absolute bit positions are preserved:
+    // the leading-one of the magnitude is at index leadBit = (padW-1) - lz.
+    val leadBit = (padW - 1).U - n3_lz
+    val isZero  = !n3_mag.orR
 
-    // regs for storing the output value
-    val out_sign = RegInit(false.B)
-    val out_exp = RegInit(0.U(exponent.W))
-    val out_frac = RegInit(0.U(mantissa.W))
+    // Unbiased exponent of the result = leadBit - unitPos; biased = + bias.
+    val biasedExp = (leadBit.zext - unitPos.S) + bias.zext
 
-    when(pipe_enable){
-      out_sign := ShiftRegister(temp_sign, 3, pipe_enable)
-      out_exp := adj_exp(exponent-1, 0)
-      out_frac := adj_frac(LSB-1, LSB - mantissa)
+    // Shift the leading one to a fixed position so we can slice mantissa + GRS guard bits.
+    // Place the hidden-1 at bit (mantissa + GRS); GRS=2 guard/round bits + a sticky below.
+    private val GRS = 2
+    val targetPos = (mantissa + GRS).U
+    val needLeft  = leadBit < targetPos
+    val lsh       = targetPos - leadBit
+    val rsh       = leadBit - targetPos
+    // Widen enough so a left shift never drops the leading one.
+    val shifted   = Mux(needLeft, (n3_mag << lsh), (n3_mag >> rsh))(magW + mantissa + GRS, 0)
+    // Bits lost on the right shift fold into the sticky for RNE.
+    val rsh_sticky = (!needLeft) && (n3_mag & ((1.U((magW + 1).W) << rsh) - 1.U))(magW - 1, 0).orR
+
+    // Field = [hidden(1) | mantissa | guard | round]  (RNE on the GRS bits + sticky)
+    val mant_pre = shifted(mantissa + GRS - 1, GRS)
+    val guard_g  = shifted(GRS - 1)
+    val round_s  = (if (GRS >= 2) shifted(GRS - 2, 0).orR else false.B) || rsh_sticky || n3_sticky
+    val round_up = guard_g && (round_s || mant_pre(0))
+    val mant_full  = mant_pre +& round_up.asUInt
+    val mant_carry = mant_full(mantissa)            // rounding overflowed 1.111..1 -> 10.0
+    val mant_rnd   = mant_full(mantissa - 1, 0)
+    val expFinal   = biasedExp + mant_carry.zext
+
+    // Saturation / underflow against the format range.
+    val overflow  = n3_ovf || (expFinal > max_exp.zext)
+    val underflow = !isZero && (expFinal < min_exp.zext)
+
+    val out_exp  = Mux(isZero, 0.U(exponent.W),
+                    Mux(overflow, max_exp,
+                      Mux(underflow, min_exp, expFinal(exponent - 1, 0))))
+    val out_frac = Mux(isZero, 0.U(mantissa.W),
+                    Mux(overflow, max_frac,
+                      Mux(underflow, min_frac, mant_rnd)))
+    val inexact  = ((guard_g || round_s) && !isZero) || overflow || underflow
+
+    // -------- Output registers --------
+    val out_sign_r    = RegInit(false.B)
+    val out_exp_r     = RegInit(0.U(exponent.W))
+    val out_frac_r    = RegInit(0.U(mantissa.W))
+    val out_valid_r   = RegInit(false.B)
+    val out_inexact_r = RegInit(false.B)
+    val out_ovf_r     = RegInit(false.B)
+
+    when(pipe_enable) {
+      out_valid_r   := n3_start
+      out_sign_r    := n3_sign
+      out_exp_r     := out_exp
+      out_frac_r    := out_frac
+      out_inexact_r := inexact || overflow || underflow
+      out_ovf_r     := overflow
     }
 
-    // --------------------------------------------------------------
-
-    // setting output port values
-    io.out_valid := ShiftRegister(out_valid,4,pipe_enable)
-    io.out_s := out_sign ## out_exp ## out_frac
+    io.out_valid    := out_valid_r
+    io.out_s        := out_sign_r ## out_exp_r ## out_frac_r
+    io.out_inexact  := out_inexact_r
+    io.out_overflow := out_ovf_r
   }
 
   class FP_cos(FORMAT: FloatingPointFormat, iters: Int) extends FPModule(FORMAT) {
