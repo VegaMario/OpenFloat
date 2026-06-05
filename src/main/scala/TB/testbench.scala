@@ -12,6 +12,8 @@ import java.math.MathContext
 import scala.util.Random
 
 object testbench extends App {
+  private def dToBits(d: Double): BigInt = BigInt(java.lang.Double.doubleToLongBits(d)) & ((BigInt(1) << 64) - 1)
+
   private def genDouble(min: Double, max: Double): Double = {
     val random = new Random()
     val randomDoubleInRange = min + (max - min) * random.nextDouble()
@@ -48,114 +50,7 @@ object testbench extends App {
   class SQRT_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
     behavior of "SQRT_TEST"
     it should "do something" in {
-      val runs = 1E6.toInt
-
-      val inputs = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
-      val expected_outputs = inputs.map(_.bigDecimal.sqrt(MathContext.DECIMAL32)).toArray
-      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
-      val observed_output = Array.fill(runs)(BigDecimal(0))
-
-      var cnt_out = 0
-      var clk = 0
-
-      test(new FP_sqrt(fmt, fmt.mantissa, fmt.mantissa)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
-        c.clock.setTimeout(0)
-        c.io.out_ready.poke(true.B)
-        c.io.in_valid.poke(true.B)
-        for(i <- 0 until runs){
-          c.io.in_a.poke(hardware_inputs(i))
-          c.clock.step()
-          clk += 1
-          if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
-            cnt_out += 1
-          }
-        }
-
-        c.io.in_valid.poke(false.B)
-
-        while(cnt_out < runs){
-          c.clock.step()
-          clk += 1
-          if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, fmt)
-            cnt_out += 1
-          }
-        }
-
-        val error = expected_outputs.zip(observed_output).map(x=>{
-          ((x._2 - x._1).abs / x._1) * 100
-        })
-
-        val max_err = error.max
-        val avg_err = error.sum / error.length
-        println(s"AVG Error: ${avg_err}%")
-        println(s"Largest Error: ${max_err}%")
-
-
-      }
-    }
-  }
-
-  class EXP_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
-    behavior of "EXP_TEST"
-    it should "do something" in {
-      val runs = 1E3.toInt
-
-      val inputs = Array.fill(runs)(BigDecimal(genDouble(-50,50)))
-      val expected_outputs = inputs.map(x=>BigDecimal(Math.exp(x.toDouble))).toArray
-      val hardware_inputs = inputs.map(x=>convert_string_to_IEEE_754(x.bigDecimal.toPlainString, fmt))
-      val observed_output = Array.fill(runs)(BigDecimal(0))
-
-      var cnt_out = 0
-      var clk = 0
-
-      test(new FP_exp(fmt)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
-        c.clock.setTimeout(0)
-        c.io.out_ready.poke(true.B)
-        c.io.in_valid.poke(true.B)
-        for(i <- 0 until runs){
-          c.io.in_data.poke(hardware_inputs(i))
-          c.clock.step()
-          clk += 1
-          if(c.io.out_valid.peekBoolean()){
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, fmt)
-            cnt_out += 1
-          }
-        }
-
-        c.io.in_valid.poke(false.B)
-
-        while(cnt_out < runs){
-          c.clock.step()
-          clk += 1
-          if(c.io.out_valid.peekBoolean()){
-            println(clk)
-            observed_output(cnt_out) = convert_IEEE754_to_Decimal(c.io.out_data.peek().litValue, fmt)
-            cnt_out += 1
-          }
-        }
-        c.clock.step(10)
-
-        val error = expected_outputs.zip(observed_output).map(x=>{
-          println(s"expected: ${x._1}, observed: ${x._2}")
-          ((x._2 - x._1).abs / x._1) * 100
-        })
-
-        val max_err = error.max
-        val avg_err = error.sum / error.length
-        println(s"AVG Error: ${avg_err}%")
-        println(s"Largest Error: ${max_err}%")
-
-
-      }
-    }
-  }
-
-  class DIV_TEST(fmt: FloatingPointFormat) extends AnyFlatSpec with ChiselScalatestTester {
-    behavior of "DIV_TEST"
-    it should "do something" in {
-      val runs = 1E6.toInt
+      val runs = 1000  // was 1E6.toInt — reduced to keep memory/time sane during debug
 
       val inputs = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
       val inputs2 = Array.fill(runs)(BigDecimal(genDouble(0,100000)))
@@ -203,6 +98,38 @@ object testbench extends App {
         println(s"Largest Error: ${max_err}%")
 
 
+      }
+    }
+  }
+
+  class SQRT_TESTv2 extends AnyFlatSpec with ChiselScalatestTester {
+    behavior of "FP64_sqrt_RNE"
+    it should "match correctly-rounded double sqrt" in {
+      val rnd = new Random(4)
+      val n = 20000
+      val lat = 52
+      test(new FP_sqrt(FP64, 52, lat)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+        // c.clock.setTimeout(0)
+        c.io.out_ready.poke(true.B)
+        c.io.in_valid.poke(true.B)
+        val as = Array.fill(n)(math.abs(rnd.nextDouble()) * math.pow(2, rnd.nextInt(40) - 20))
+        val res = new Array[BigInt](n); var outc = 0
+        for (i <- 0 until n) {
+          c.io.in_a.poke(dToBits(as(i)).U)
+          c.clock.step(); if (c.io.out_valid.peekBoolean()) { res(outc) = c.io.out_s.peek().litValue; outc += 1 }
+        }
+        c.io.in_valid.poke(false.B)
+        while (outc < n) { c.clock.step(); if (c.io.out_valid.peekBoolean()) { res(outc) = c.io.out_s.peek().litValue; outc += 1 } }
+        var mism = 0; var off1 = 0
+        for (i <- 0 until n) {
+          val exp = dToBits(math.sqrt(as(i)))
+          if (res(i) != exp) {
+            mism += 1
+            if ((res(i) - exp).abs == 1 || (exp - res(i)).abs == 1) off1 += 1
+            if (mism <= 10) println(f"SQRT mismatch: sqrt(${as(i)}) hw=0x${res(i)}%016x exp=0x$exp%016x")
+          }
+        }
+        println(s"SQRT: $mism / $n mismatches ($off1 are off-by-1-ulp)")
       }
     }
   }
@@ -426,7 +353,8 @@ object testbench extends App {
 
   // run test
 //  runTest(new BasicTest(FP32))
-//  runTest(new SQRT_TEST(FP32))
+//  runTest(new SQRT_TEST(FP64))
+// runTest(new SQRT_TESTv2)
 //  runTest(new DIV_TEST(FP32))
 //  runTest(new EXP_TEST(FP32))
 }

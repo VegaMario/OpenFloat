@@ -17,12 +17,17 @@ OpenFloat/
 │   │   ├── FloatingPointFormat.scala # Format definitions and FPModule base class
 │   │   └── fpu.scala           # All floating-point operation implementations
 │   ├── Primitives/             # Low-level building blocks
-│   │   ├── primitives.scala    # Arithmetic primitives (adders, dividers, CORDIC, etc.)
+│   │   ├── primitives.scala    # Arithmetic primitives (adders, dividers, CORDIC, hpmath, etc.)
 │   │   └── convert.scala       # IEEE 754 format conversion utilities
 │   ├── Generate/               # RTL generation utilities
 │   │   └── generate.scala      # SystemVerilog output generator
-│   └── TB/                     # Test benches
-│       └── testbench.scala     # Verification test suites
+│   └── TB/                     # Standalone test benches (run via `runMain`)
+│       └── testbench.scala     # Example/legacy verification harnesses
+├── src/test/scala/             # ScalaTest accuracy regression suites (run via `sbt test`)
+│   ├── RoundingSpec.scala      # FP_add / FP_mult vs correctly-rounded FP64
+│   ├── DivSqrtSpec.scala       # FP_div / FP_sqrt vs correctly-rounded FP64
+│   ├── TranscendentalSpec.scala# FP_cos / FP_atan / FP_exp accuracy (avg & max error)
+│   └── CordicCoreSpec.scala    # cordic / ucordic core cos/sin accuracy
 ├── build.sbt                   # SBT build configuration
 ├── LICENSE                     # BSD-style license
 └── README.md                   # This file
@@ -44,14 +49,21 @@ You can also define arbitrary custom formats using `CustomFormat(exponent, manti
 
 ## Floating-Point Modules
 
+All arithmetic and transcendental modules are **IEEE round-to-nearest-even (RNE)**
+internally. The basic operations (`FP_add`, `FP_mult`, `FP_div`, `FP_sqrt`) are
+bit-exact correctly-rounded against a software FP64 reference, and the transcendental
+units (`FP_cos`, `FP_atan`, `FP_exp`) achieve near-correctly-rounded accuracy (low
+single-digit ULP) by carrying guard bits and rounding at every datapath boundary.
+See [Precision and Rounding](#precision-and-rounding) for details.
+
 ### Basic Arithmetic Operations
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
-| `FP_add` | Floating-point addition | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
-| `FP_mult` | Floating-point multiplication | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
-| `FP_div` | Digit-recurrence division | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
-| `FP_sqrt` | Digit-recurrence square root | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
+| `FP_add` | Floating-point addition (RNE) | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
+| `FP_mult` | Floating-point multiplication (RNE) | `FORMAT`: FloatingPointFormat, `latency`: pipeline depth (any value >= 1) |
+| `FP_div` | Digit-recurrence division (RNE) | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
+| `FP_sqrt` | Digit-recurrence square root (RNE) | `FORMAT`: FloatingPointFormat, `L`: iterations, `latency`: pipeline stages |
 
 ### Transcendental Functions
 
@@ -61,14 +73,19 @@ You can also define arbitrary custom formats using `CustomFormat(exponent, manti
 | `FP_atan` | Arctangent (CORDIC-based) | `FORMAT`: FloatingPointFormat, `iters`: CORDIC iterations |
 | `FP_exp` | Exponential function (e^x) | `FORMAT`: FloatingPointFormat |
 
+> **Accuracy note:** the transcendental units feed their inputs through a
+> float-to-fixed converter, a CORDIC engine, and a fixed-to-float converter. All three
+> stages now round-to-nearest and carry internal guard bits, so results are accurate to
+> a few ULP across the full input range (see [Precision and Rounding](#precision-and-rounding)).
+
 ### Utility Modules
 
 | Module | Description | Parameters |
 |--------|-------------|------------|
 | `FP_acc` | Floating-point accumulator | `FORMAT`: FloatingPointFormat, `iters`: accumulation count, `ExpExp`, `ExpMSB`, `LSB` |
-| `FP_floor` | Floor function with dual outputs: integer part (`out_whole`) and fractional part (`out_frac`). Useful as a range reduction building block (e.g., used by `FP_cos`). | `FORMAT`: FloatingPointFormat |
-| `FloatTOFixed` | Float to fixed-point conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
-| `FixedTOFloat` | Fixed-point to float conversion | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
+| `FP_floor` | Floor function with dual outputs: integer part (`out_whole`) and fractional part (`out_frac`). Useful as a range reduction building block (e.g., used by `FP_cos`). Correctly handles negative exact integers (where `floor(x) == x`). | `FORMAT`: FloatingPointFormat |
+| `FloatTOFixed` | Float to fixed-point conversion. Carries guard bits through the alignment shift and rounds-to-nearest-even (with a sticky bit), instead of truncating. | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
+| `FixedTOFloat` | Fixed-point to float conversion. Rounds-to-nearest-even when extracting the mantissa (with carry-out exponent bump), instead of truncating. | `FORMAT`: FloatingPointFormat, `ibits`: integer bits, `fbits`: fractional bits |
 
 ### Pipeline Depth
 
@@ -86,9 +103,10 @@ The `Primitives` package provides low-level building blocks:
 | `multiplier` | Basic integer multiplication |
 | `divider` | Digit-recurrence integer divider (pipelined) |
 | `frac_sqrt` | Fractional square root for normalized numbers |
-| `cordic` | Fixed-point CORDIC processor (rotation/vectoring modes) |
-| `ucordic` | Universal CORDIC with runtime mode selection (`ctrl_mode`, `ctrl_vectoring`). A single instance can compute cos, sin, atan, multiply, divide, sinh, cosh, atanh, exp, and ln. Supports **circular** (mu=1), **linear** (mu=0), and **hyperbolic** (mu=-1) modes in both rotation and vectoring. Correctly implements hyperbolic iteration index repetition (indices 4, 13, 40, 121) for convergence. |
+| `cordic` | Fixed-point CORDIC processor (rotation/vectoring modes). Carries internal fractional guard bits during the iterations and rounds-to-nearest at the output. |
+| `ucordic` | Universal CORDIC with runtime mode selection (`ctrl_mode`, `ctrl_vectoring`). A single instance can compute cos, sin, atan, multiply, divide, sinh, cosh, atanh, exp, and ln. Supports **circular** (mu=1), **linear** (mu=0), and **hyperbolic** (mu=-1) modes in both rotation and vectoring. Correctly implements hyperbolic iteration index repetition (indices 4, 13, 40, 121) for convergence. Carries internal fractional guard bits and rounds-to-nearest at the output. |
 | `cos`, `atan`, `exp` | Fixed-point trigonometric/exponential wrappers |
+| `hpmath` | High-precision (BigDecimal) generators for the CORDIC constant tables (`atan`, `atanh`, `sqrt`, `PI`) and gain inverses. Computed at ~120 significant digits and rounded-to-nearest so the constants are accurate for every format through FP128. |
 
 ## Software Conversion Utilities
 
@@ -220,13 +238,33 @@ Trigonometric and hyperbolic functions use the CORDIC algorithm, which computes 
 - **Linear mode** (mu = 0): multiplication, division
 - **Hyperbolic mode** (mu = -1): sinh, cosh, atanh, exp, ln
 
+Both the `cordic` and `ucordic` engines carry **internal fractional guard bits** (`G = ceil(log2(iters)) + 2`) throughout the iteration datapath. Inputs are up-shifted into the wider fixed-point domain on entry, every micro-rotation is computed at the extended precision, and the result is rounded-to-nearest back down to the requested `fbits` at the output. This prevents the per-iteration right-shift truncations from accumulating into the low result bits.
+
+The angle / atanh / 2^-i constant tables and the CORDIC gain inverses are generated by the `hpmath` helper using `BigDecimal` arithmetic (~120 significant digits) and rounded-to-nearest, so the constants are accurate for every supported format up to FP128 — including the `atan(1)` table entry, which the naive Maclaurin series cannot resolve.
+
+### Cosine / Sine Range Reduction
+`FP_cos` reduces an arbitrary angle to `[0, 2*pi)` by computing `x / (2*pi)` (with a full-mantissa digit-recurrence divide), taking the fractional part via `FP_floor`, and multiplying back by `2*pi`. The reduced angle is then converted to a fixed-point format that maximizes fractional precision (a small number of integer bits for the `[0, 2*pi)` range, the rest fractional) before entering the circular CORDIC engine.
+
+### Arctangent
+`FP_atan` converts the input to fixed-point, runs a vectoring-mode CORDIC, and converts the resulting angle back to float. The fixed-point format is chosen to spend most of its width on fractional bits (`fbits ~ mantissa + headroom`) rather than splitting the width evenly — `atan(x)` saturates toward `+/-pi/2` for large `|x|`, so only a few integer bits are needed.
+
 ### Exponential (e^x)
 `FP_exp` uses range reduction to decompose `x / ln(2) = w + f` into an integer part `w` and fractional part `f`. The fractional part is computed via a hyperbolic CORDIC engine (`e^(f * ln(2)) = 2^f`), while the integer part becomes an exponent bias adjustment.
 
 #### Multiplierless CSD Constant Multiplication
 Constant multiplications by `ln(2)` and `1/ln(2)` are implemented using **Canonical Signed Digit (CSD) encoding**, which decomposes fixed-point constants into a minimal set of shift-and-add/subtract operations — eliminating the need for hardware multipliers. The CSD algorithm guarantees no two consecutive non-zero digits, minimizing the number of additions/subtractions required. This is a significant area optimization for ASIC and FPGA targets, as it replaces wide multipliers with a small number of barrel shifts and adders.
 
-The `ln(2)` and `1/ln(2)` constants are specified with over 300 decimal digits of precision, sufficient to support all standard formats through FP128 (112-bit mantissa) without loss of accuracy from constant truncation.
+The `ln(2)` and `1/ln(2)` constants are specified with over 300 decimal digits of precision, sufficient to support all standard formats through FP128 (112-bit mantissa) without loss of accuracy from constant truncation. The constants are rounded-to-nearest when scaled to fixed point, and the `>> scale` descale after each CSD multiply also rounds-to-nearest rather than truncating.
+
+### Precision and Rounding
+Every lossy step in the datapath rounds-to-nearest (rather than truncating toward zero) and carries guard/round/sticky information so error does not accumulate or bias:
+
+- **`FP_add`, `FP_mult`, `FP_div`, `FP_sqrt`** carry guard + round + sticky bits below the mantissa and apply IEEE **round-to-nearest-even (RNE)**. They are bit-exact correctly-rounded against a software FP64 reference.
+- **`FloatTOFixed` / `FixedTOFloat`** round-to-nearest-even when aligning/extracting (with sticky capture), instead of truncating.
+- **`cordic` / `ucordic`** carry internal fractional guard bits and round the result back to `fbits`.
+- **Constant tables and gains** are generated at high precision (`hpmath`, BigDecimal) and rounded-to-nearest.
+
+As a result the transcendental units (`FP_cos`, `FP_atan`, `FP_exp`) track the software (CPU) FP64 results to within a few ULP across the full input range; the underlying CORDIC cores reproduce software cos/sin to the limit of the fixed-point representation.
 
 ### Overflow/Underflow Handling
 All modules implement saturation arithmetic:
@@ -235,6 +273,38 @@ All modules implement saturation arithmetic:
 
 #### Input Saturation
 All FPU modules clamp input exponents to the `[min_exp, max_exp]` range at the input stage, preventing undefined behavior for out-of-range or special values. `FP_exp` further narrows the accepted input range (capping at `bias + exponent - 2` and flooring at `bias - mantissa`) to avoid catastrophic overflow or underflow of the exponential output.
+
+## Verification
+
+Accuracy regression suites live in `src/test/scala/` and run under ScalaTest with the
+Verilator backend. Each suite drives random inputs through the hardware and compares the
+output against a software FP64 reference.
+
+| Spec | Modules under test | Reports |
+|------|--------------------|---------|
+| `RoundingSpec` | `FP_add`, `FP_mult` | exact bit-pattern mismatches, off-by-1-ULP count, avg/max relative & absolute error |
+| `DivSqrtSpec` | `FP_div`, `FP_sqrt` | exact bit-pattern mismatches, off-by-1-ULP count, avg/max relative & absolute error |
+| `TranscendentalSpec` | `FP_cos`, `FP_atan`, `FP_exp` | avg/max relative & absolute error vs `Math.cos`/`sin`/`atan`/`exp` |
+| `CordicCoreSpec` | `cordic`, `ucordic` | per-input cos/sin error for the raw CORDIC cores |
+
+The basic arithmetic specs (`RoundingSpec`, `DivSqrtSpec`) expect **zero** mismatches —
+the hardware is bit-exact correctly-rounded against the FP64 reference. The transcendental
+specs print average and maximum error so precision can be tracked over time.
+
+Run all suites:
+
+```bash
+sbt test
+```
+
+Run a single suite:
+
+```bash
+sbt "testOnly TB.RoundingSpec"
+sbt "testOnly TB.DivSqrtSpec"
+sbt "testOnly TB.TranscendentalSpec"
+sbt "testOnly TB.CordicCoreSpec"
+```
 
 ## License
 

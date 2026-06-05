@@ -4,6 +4,110 @@ import chisel3.util.{MuxCase, Pipe, ShiftRegister, is, log2Ceil, switch}
 import scala.math._
 object primitives {
 
+  // ---------------------------------------------------------------------------
+  // High-precision constant generation for the CORDIC engines.
+  //
+  // Constants (angle tables, gains, PI) were previously produced with scala.math
+  // Double functions and then *truncated* to integer via .toBigInt. Double caps
+  // precision at ~52 bits (insufficient for FP64/FP128), and truncation biases
+  // every table entry toward zero by up to 1 ULP, accumulating error over
+  // iterations. hpmath computes these in BigDecimal at high precision and rounds
+  // to nearest, eliminating both error sources.
+  // ---------------------------------------------------------------------------
+  object hpmath {
+    private val mc = new java.math.MathContext(120) // ~120 significant decimal digits
+
+    // Round a scaled BigDecimal to the nearest integer (round-half-up). Use this
+    // everywhere a fixed-point constant is materialized so we never truncate.
+    def round(x: BigDecimal): BigInt =
+      x.setScale(0, BigDecimal.RoundingMode.HALF_UP).toBigInt
+
+    // High-precision PI via Machin-like Chudnovsky-free arctan series (Machin's formula):
+    //   pi = 16*atan(1/5) - 4*atan(1/239)
+    lazy val PI: BigDecimal = (BigDecimal(16) * atan(BigDecimal(1) / 5) -
+                               BigDecimal(4) * atan(BigDecimal(1) / 239))
+
+    // atan(x) for |x| <= 1 via Maclaurin series, evaluated in BigDecimal.
+    // The raw series converges as ~1/n near |x|=1 (e.g. atan(1) = 1 - 1/3 + 1/5 - ...),
+    // far too slow. We first apply the half-angle identity
+    //   atan(x) = 2 * atan( x / (1 + sqrt(1 + x^2)) )
+    // repeatedly to shrink the argument below ~0.4, where the series converges quickly.
+    def atan(x: BigDecimal): BigDecimal = {
+      if (x == BigDecimal(0)) return BigDecimal(0)
+      if (x < 0) return -atan(-x)
+      // Argument reduction: halve until small enough for fast series convergence.
+      var reductions = 0
+      var y = x
+      while (y > BigDecimal("0.4")) {
+        val s = sqrt((BigDecimal(1) + (y * y)).round(mc))
+        y = (y / (BigDecimal(1) + s)).round(mc)
+        reductions += 1
+      }
+      // Maclaurin series for the reduced (small) argument.
+      var term = y
+      var sum = y
+      var nn = 1
+      val y2 = (y * y).round(mc)
+      val tol = BigDecimal(10).pow(-115)
+      while (term.abs > tol && nn < 200000) {
+        term = (term * y2).round(mc)
+        nn += 2
+        val t = (term / nn)
+        if (((nn - 1) / 2) % 2 == 1) sum = (sum - t).round(mc) else sum = (sum + t).round(mc)
+      }
+      // Undo the halvings: each reduction halved the angle, so multiply back by 2^reductions.
+      var result = sum
+      var r = 0
+      while (r < reductions) { result = (result * 2).round(mc); r += 1 }
+      result
+    }
+
+    // atanh(x) for |x| < 1 via series x + x^3/3 + x^5/5 + ...
+    def atanh(x: BigDecimal): BigDecimal = {
+      var term = x
+      var sum = x
+      var n = 1
+      val x2 = (x * x).round(mc)
+      val tol = BigDecimal(10).pow(-110)
+      while (term.abs > tol && n < 100000) {
+        term = (term * x2).round(mc)
+        n += 2
+        sum = (sum + term / n).round(mc)
+      }
+      sum
+    }
+
+    // 2^(-i) exactly as a BigDecimal.
+    def pow2neg(i: Int): BigDecimal = BigDecimal(1) / BigDecimal(2).pow(i)
+
+    // sqrt(x) via Newton-Raphson in BigDecimal.
+    def sqrt(x: BigDecimal): BigDecimal = {
+      if (x == BigDecimal(0)) return BigDecimal(0)
+      var g = BigDecimal(Math.sqrt(x.toDouble)) // double seed, refined below
+      var i = 0
+      while (i < 80) { g = ((g + x / g) / 2).round(mc); i += 1 }
+      g
+    }
+
+    // Circular-mode CORDIC gain inverse 1/K, where K = prod_{i=0}^{n-1} sqrt(1 + 2^-2i).
+    // Computed at high precision so cos/sin scaling is exact to the target fbits.
+    def circ_gain_inv(n: Int): BigDecimal = {
+      val K = (0 until n).map(i => sqrt(1 + pow2neg(2 * i))).foldLeft(BigDecimal(1))((a, b) => (a * b).round(mc))
+      (BigDecimal(1) / K).round(mc)
+    }
+
+    // Hyperbolic index sequence with repeated indices at 4,13,40,121 (matches ucordic).
+    def hyperIndices(n: Int): Array[Int] =
+      (1 to n + 1).flatMap(i => if (i == 4 || i == 13 || i == 40 || i == 121) Array(i, i) else Array(i)).toArray.slice(0, n)
+
+    // Hyperbolic-mode CORDIC gain inverse 1/K', K' = prod sqrt(1 - 2^-2i) over hyper indices.
+    def hyper_gain_inv(n: Int): BigDecimal = {
+      val idx = hyperIndices(n)
+      val Kp = idx.map(i => sqrt(1 - pow2neg(2 * i))).foldLeft(BigDecimal(1))((a, b) => (a * b).round(mc))
+      (BigDecimal(1) / Kp).round(mc)
+    }
+  }
+
   // finds the leading zero count of an input radix-bit number
   class LZC_enc(radix: Int) extends Module {
     val io = IO(new Bundle{
@@ -195,6 +299,7 @@ object primitives {
       val in_valid = Input(Bool())
       val out_valid = Output(Bool())
       val out_s = Output(UInt(bw.W))
+      val out_inexact = Output(Bool()) // true when the remainder is non-zero (result not exact)
     })
     override def desiredName = s"frac_sqrt_BW${bw}_${latency}"
     val pipe_skip = if (latency >= L) 1 else  L / latency
@@ -207,12 +312,12 @@ object primitives {
     val pipe_enable = io.out_ready || !io.out_valid
 
     val P_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+1).W)))
-    val X_wires = WireDefault(VecInit.fill(L-1)(0.U((bw*2+2).W)))
+    val X_wires = WireDefault(VecInit.fill(L)(0.U((bw*2+2).W))) // now track X for all L iterations (for sticky)
     val result_wires = WireDefault(VecInit.fill(L)(0.U(bw.W)))
     val ovalid_wires = Wire(Vec(L, Bool()))
 
     val P_pipeline = P_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
-    val X_pipeline = X_wires.zip(ovalid_wires.slice(0,L-1)).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
+    val X_pipeline = X_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
     val result_pipeline = result_wires.zip(ovalid_wires).zip(pipe_map).map(i=>Pipe(i._1._2 && pipe_enable,i._1._1,i._2))
 
     val one = 1.U(1.W) ## 0.U((bw*2).W)
@@ -225,6 +330,7 @@ object primitives {
     val lastPipeIndex = pipe_map.lastIndexWhere(_ > 0)
     io.out_valid := result_pipeline(lastPipeIndex).valid
     io.out_s := result_pipeline.last.bits
+    io.out_inexact := X_pipeline.last.bits.orR // remainder non-zero => sqrt is inexact
     val in = (io.in_a ## 0.U(bw.W)) - one
     // Ready when pipeline can advance
     io.in_ready := pipe_enable
@@ -247,10 +353,12 @@ object primitives {
         val shifted_P = shifted_ps(i-1)
         val y = shifted_P +& shifted_one
         val yleqx = y <= X_pipeline(i-1).bits
+        // Always compute the updated remainder X (including the final iteration) so the
+        // out_inexact sticky bit is correct. Only P is unneeded on the last iteration.
         if(i != L - 1) {
           P_wires(i) := Mux(yleqx, shifted_ones(i) + P_pipeline(i-1).bits, P_pipeline(i-1).bits)
-          X_wires(i) := Mux(yleqx, X_pipeline(i-1).bits - y, X_pipeline(i-1).bits)
         }
+        X_wires(i) := Mux(yleqx, X_pipeline(i-1).bits - y, X_pipeline(i-1).bits)
         val t = VecInit(result_pipeline(i-1).bits.asBools)
         t(bw-1 - i):= yleqx
         result_wires(i) := t.asUInt
@@ -283,16 +391,29 @@ object primitives {
     })
     override def desiredName = if(!v) s"cordic_${bw}_$n" else s"vcordic_${bw}_$n"
 
-    private val scale_f = BigDecimal(2).pow(fbits)
-    private val Kbase = (0 until n).map(i => BigDecimal(Math.sqrt(1 + Math.pow(2, -i * 2)))).product
-    private val K_inv = (((1/Kbase) * scale_f).toBigInt).asSInt((bw+1).W)
-    private val angles = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-i))) * scale_f).toBigInt.asSInt((bw+1).W)))
-    private val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
-    private val zero = 0.S((bw+1).W)
-    private val PI = (BigDecimal(Math.PI) * scale_f).toBigInt.asSInt((bw+1).W)
-    private val PIdiv2 = (BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
-    private val threePIdiv2 = (3 * BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
-    private val quad_ang = VecInit((0 until 5).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W)))
+    // --- Internal guard bits (precision) ---
+    // Each iteration does an arithmetic right shift (>> i) and truncates the bits
+    // shifted out. Over n iterations these truncations accumulate and corrupt the
+    // low mantissa bits of the result. To keep the result accurate to `fbits`, we
+    // carry G extra fractional guard bits internally (G ~ ceil(log2(n)) + 2), run
+    // all iterations in the widened fixed-point domain, then round-to-nearest-even
+    // back down to `fbits` at the output. Constants are scaled by 2^(fbits+G).
+    private val G = log2Ceil(math.max(n, 2)) + 2
+    private val W = bw + 1 + G            // internal signed datapath width
+    private val ifb = fbits + G           // internal fractional bits
+
+    private val scale_i = BigDecimal(2).pow(ifb)   // internal (guarded) scale
+    private val scale_f = BigDecimal(2).pow(fbits)  // external scale (for input compare consts)
+    private val Kbase = (0 until n).map(i => hpmath.sqrt(1 + hpmath.pow2neg(i * 2))).product
+    private val K_inv = hpmath.round((1/Kbase) * scale_i).asSInt(W.W)
+    private val angles = VecInit((0 until n).map(i=> hpmath.round(hpmath.atan(hpmath.pow2neg(i)) * scale_i).asSInt(W.W)))
+    private val one = hpmath.round(BigDecimal(1.0) * scale_i).asSInt(W.W)
+    private val zero = 0.S(W.W)
+    // Quadrant-detect constants compare against io.in_d, which is in the *external* fbits scale.
+    private val PI = hpmath.round(hpmath.PI * scale_f).asSInt((bw+1).W)
+    private val PIdiv2 = hpmath.round(hpmath.PI/2 * scale_f).asSInt((bw+1).W)
+    private val threePIdiv2 = hpmath.round(3 * hpmath.PI/2 * scale_f).asSInt((bw+1).W)
+    private val quad_ang = VecInit((0 until 5).map(i=> hpmath.round(hpmath.PI * (4-i) / 2 * scale_f).asSInt((bw+1).W)))
 
     // Pipeline enable: advance when output is consumed or no valid output
     val pipe_enable = io.out_ready || !io.out_valid
@@ -304,8 +425,11 @@ object primitives {
     val quad_idx_inv = (~quad_idx).asUInt
 
     val quad_detector = Mux(inpsign, quad_idx_inv, quad_idx)
+    // res is in external fbits scale; widen by G to enter the guarded domain.
     val res = Mux(leftright, quad_ang(quad_idx_inv +& 0.U) - io.in_d.abs, io.in_d.abs - quad_ang(quad_idx_inv +& 1.U))
-    val corrected_angle = Mux(inpsign, -res, res)
+    val corrected_angle = (Mux(inpsign, -res, res).asSInt << G).asSInt // upshift to ifb fractional bits
+    // For vectoring mode, io.in_d (the tangent) is also brought into the guarded domain.
+    val in_d_g = (io.in_d << G).asSInt
 
     val pipe_skip = if (latency >= n) 1 else  n / latency
     val pipe_map = Array.fill(n)(0)
@@ -313,11 +437,11 @@ object primitives {
       pipe_map((i*pipe_skip) % n) += 1
     }
 
-    val (x0,y0,z0) = if(!v) (K_inv, zero, corrected_angle) else (one, io.in_d, zero)
+    val (x0,y0,z0) = if(!v) (K_inv, zero, corrected_angle) else (one, in_d_g, zero)
 
-    val xiw = Wire(Vec(n+1, SInt((bw+1).W)))
-    val yiw = Wire(Vec(n+1, SInt((bw+1).W)))
-    val ziw = Wire(Vec(n+1, SInt((bw+1).W)))
+    val xiw = Wire(Vec(n+1, SInt(W.W)))
+    val yiw = Wire(Vec(n+1, SInt(W.W)))
+    val ziw = Wire(Vec(n+1, SInt(W.W)))
 
     val siw = Wire(Vec(n+1, Bool()))
 
@@ -333,8 +457,8 @@ object primitives {
     ovalid_wires(0) := io.in_valid && io.in_ready
     for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
 
-    siw(0) := (if(!v) z0(bw).asBool else !y0(bw).asBool)
-    siw.slice(1,n+1).zip(if(!v) zir_pipeline.slice(0,n) else yir_pipeline.slice(0,n)).foreach(x=> x._1 := (if(v) !x._2.bits(bw).asBool  else x._2.bits(bw).asBool))
+    siw(0) := (if(!v) z0(W-1).asBool else !y0(W-1).asBool)
+    siw.slice(1,n+1).zip(if(!v) zir_pipeline.slice(0,n) else yir_pipeline.slice(0,n)).foreach(x=> x._1 := (if(v) !x._2.bits(W-1).asBool  else x._2.bits(W-1).asBool))
 
     // initial iteration
     xiw(0) := x0 + Mux(siw(0), y0, -y0).asSInt
@@ -354,32 +478,42 @@ object primitives {
     val quad_detected = ShiftRegister(quad_detector, latency, pipe_enable)
     val sign_detected = ShiftRegister(inpsign, latency, pipe_enable)
 
+    // Round-to-nearest-even from the internal ifb-fractional domain back down to fbits.
+    // Adds 2^(G-1) then arithmetic-right-shifts by G (round-half-up; bias negligible vs guard).
+    def rnd(x: SInt): SInt = {
+      if (G == 0) x
+      else ((x +& (BigInt(1) << (G-1)).S(W.W)) >> G).asSInt
+    }
+    val xn = rnd(xiw(n))
+    val yn = rnd(yiw(n))
+    val zn = rnd(ziw(n))
+
     val cos = WireDefault(0.S((bw+1).W))
     val sin = WireDefault(0.S((bw+1).W))
 
     switch(quad_detected){
       is (0.U){
-        cos := xiw(n)
-        sin := Mux(sign_detected, -yiw(n), yiw(n))
+        cos := xn
+        sin := Mux(sign_detected, -yn, yn)
       }
       is (1.U){
-        cos := -xiw(n)
-        sin := Mux(sign_detected, -yiw(n), yiw(n))
+        cos := -xn
+        sin := Mux(sign_detected, -yn, yn)
       }
       is (2.U){
-        cos := -xiw(n)
-        sin := Mux(sign_detected, yiw(n), -yiw(n))
+        cos := -xn
+        sin := Mux(sign_detected, yn, -yn)
       }
       is (3.U){
-        cos := xiw(n)
-        sin := Mux(sign_detected, yiw(n), -yiw(n))
+        cos := xn
+        sin := Mux(sign_detected, yn, -yn)
       }
     }
 
     io.out_valid := xir_pipeline.last.valid
-    io.out_x := (if(!v) cos else xiw(n))
-    io.out_y := (if(!v) sin else yiw(n))
-    io.out_z := ziw(n)
+    io.out_x := (if(!v) cos else xn)
+    io.out_y := (if(!v) sin else yn)
+    io.out_z := zn
   }
 
   // universal cordic
@@ -407,6 +541,14 @@ object primitives {
     })
     override def desiredName = s"ucordic_${bw}_$n"
 
+    // --- Internal guard bits (precision) ---
+    // Same rationale as the fixed cordic: the per-iteration arithmetic right shift
+    // truncates, accumulating error over n iterations. Carry G extra fractional guard
+    // bits internally and round-to-nearest-even back to `fbits` at the outputs.
+    private val G = log2Ceil(math.max(n, 2)) + 2
+    private val W = bw + 1 + G       // internal signed datapath width
+    private val ifb = fbits + G      // internal fractional bits
+
     val normal_i = (0 until n).toArray
     val hyper_i = (1 until n+1).flatMap(i=>{
       if(i==4 || i==13 || i==40 || i==121)
@@ -421,10 +563,10 @@ object primitives {
       r
     }
 
-    private val scale_f = BigDecimal(2).pow(fbits)
-    private val a_arctan = VecInit((0 until n).map(i=> (BigDecimal(Math.atan(Math.pow(2,-(normal_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
-    private val a_pow2 = VecInit((0 until n).map(i=> (BigDecimal(Math.pow(2,-(normal_i(i)))) * scale_f).toBigInt.asSInt((bw+1).W)))
-    private val a_hypertan = VecInit((0 until n).map(i=> (BigDecimal(atanh(Math.pow(2,-(hyper_i(i))))) * scale_f).toBigInt.asSInt((bw+1).W)))
+    private val scale_i = BigDecimal(2).pow(ifb) // guarded internal scale
+    private val a_arctan = VecInit((0 until n).map(i=> hpmath.round(hpmath.atan(hpmath.pow2neg(normal_i(i))) * scale_i).asSInt(W.W)))
+    private val a_pow2 = VecInit((0 until n).map(i=> hpmath.round(hpmath.pow2neg(normal_i(i)) * scale_i).asSInt(W.W)))
+    private val a_hypertan = VecInit((0 until n).map(i=> hpmath.round(hpmath.atanh(hpmath.pow2neg(hyper_i(i))) * scale_i).asSInt(W.W)))
 
     val pipe_skip = if (latency >= n) 1 else  n / latency
     val pipe_map = Array.fill(n)(0)
@@ -432,13 +574,14 @@ object primitives {
       pipe_map((i*pipe_skip) % n) += 1
     }
 
-    val (x0,y0,z0) = (io.in_x, io.in_y, io.in_z)
+    // Bring the bw+1-bit external inputs (fbits fractional) into the guarded domain.
+    val (x0,y0,z0) = ((io.in_x << G).asSInt, (io.in_y << G).asSInt, (io.in_z << G).asSInt)
 
-    val xiw = Wire(Vec(n+1, SInt((bw+1).W)))
-    val yiw = Wire(Vec(n+1, SInt((bw+1).W)))
-    val ziw = Wire(Vec(n+1, SInt((bw+1).W)))
+    val xiw = Wire(Vec(n+1, SInt(W.W)))
+    val yiw = Wire(Vec(n+1, SInt(W.W)))
+    val ziw = Wire(Vec(n+1, SInt(W.W)))
 
-    val aiw = WireDefault(VecInit.fill(n)(0.S((bw+1).W)))
+    val aiw = WireDefault(VecInit.fill(n)(0.S(W.W)))
     val iterw = WireDefault(VecInit.fill(n)(0.U(log2Ceil(n).W)))
 
     val mu = io.ctrl_mode
@@ -474,12 +617,12 @@ object primitives {
     ovalid_wires(0) := io.in_valid && io.in_ready
     for(i <- 1 until n) ovalid_wires(i) := xir_pipeline(i-1).valid
 
-    diw(0) := Mux(io.ctrl_vectoring, !y0(bw).asBool, z0(bw).asBool)
-    diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(bw).asBool, zir_pipeline(x._2).bits(bw).asBool))
+    diw(0) := Mux(io.ctrl_vectoring, !y0(W-1).asBool, z0(W-1).asBool)
+    diw.slice(1,n+1).zipWithIndex.foreach(x=>x._1 := Mux(io.ctrl_vectoring, !yir_pipeline(x._2).bits(W-1).asBool, zir_pipeline(x._2).bits(W-1).asBool))
 
     // initial iteration
     val y0_mu = Mux(mu(1).asBool, -y0, y0)
-    xiw(0) := x0 + (Mux(mu === 0.S(2.W), 0.S((bw+1).W), Mux(diw(0), y0_mu, -y0_mu)) >> iterw(0)).asSInt
+    xiw(0) := x0 + (Mux(mu === 0.S(2.W), 0.S(W.W), Mux(diw(0), y0_mu, -y0_mu)) >> iterw(0)).asSInt
     yiw(0) := y0 + (Mux(diw(0), -x0, x0) >> iterw(0)).asSInt
     ziw(0) := z0 + Mux(diw(0), aiw(0), -aiw(0))
 
@@ -489,15 +632,21 @@ object primitives {
 
     for (i <- 1 until n) {
       val yi_mu = Mux(mu(1).asBool, -yir_pipeline(i-1).bits, yir_pipeline(i-1).bits)
-      xiw(i) := xir_pipeline(i-1).bits + (Mux(mu === 0.S(2.W), 0.S((bw+1).W), Mux(diw(i), yi_mu, -yi_mu)) >> iterw(i)).asSInt
+      xiw(i) := xir_pipeline(i-1).bits + (Mux(mu === 0.S(2.W), 0.S(W.W), Mux(diw(i), yi_mu, -yi_mu)) >> iterw(i)).asSInt
       yiw(i) := yir_pipeline(i-1).bits + (Mux(diw(i), -xir_pipeline(i-1).bits, xir_pipeline(i-1).bits) >> iterw(i)).asSInt
       ziw(i) := zir_pipeline(i-1).bits + Mux(diw(i), aiw(i), -aiw(i))
     }
 
+    // Round-to-nearest from the guarded internal domain back to fbits (bw+1-bit output).
+    def rnd(x: SInt): SInt = {
+      if (G == 0) x
+      else ((x +& (BigInt(1) << (G-1)).S(W.W)) >> G).asSInt
+    }
+
     io.out_valid := xir_pipeline.last.valid
-    io.out_x := xiw(n)
-    io.out_y := yiw(n)
-    io.out_z := ziw(n)
+    io.out_x := rnd(xiw(n))
+    io.out_y := rnd(yiw(n))
+    io.out_z := rnd(ziw(n))
   }
 
   // ucordic for cos/sin
@@ -512,14 +661,14 @@ object primitives {
       val out_sin = Output(SInt((bw+1).W))
     })
     val scale_f = BigDecimal(2).pow(fbits)
-    val K_inv = ((0.607252935009 * scale_f).toBigInt).asSInt((bw+1).W)
-    val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+    val K_inv = hpmath.round(hpmath.circ_gain_inv(iters) * scale_f).asSInt((bw+1).W)
+    val one = hpmath.round(BigDecimal(1.0) * scale_f).asSInt((bw+1).W)
     val zero = 0.S((bw+1).W)
 
-    val PI = (BigDecimal(Math.PI) * scale_f).toBigInt.asSInt((bw+1).W)
-    val PIdiv2 = (BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
-    val threePIdiv2 = (3 * BigDecimal(Math.PI)/2 * scale_f).toBigInt.asSInt((bw+1).W)
-    val quad_ang = VecInit((0 until 5).map(i=>(BigDecimal(Math.PI * (4-i) / 2) * scale_f).toBigInt.asSInt((bw+1).W)))
+    val PI = hpmath.round(hpmath.PI * scale_f).asSInt((bw+1).W)
+    val PIdiv2 = hpmath.round(hpmath.PI/2 * scale_f).asSInt((bw+1).W)
+    val threePIdiv2 = hpmath.round(3 * hpmath.PI/2 * scale_f).asSInt((bw+1).W)
+    val quad_ang = VecInit((0 until 5).map(i=> hpmath.round(hpmath.PI * (4-i) / 2 * scale_f).asSInt((bw+1).W)))
 
     val inpsign = io.in_angle(bw)
     val updown = io.in_angle.abs > PI
@@ -568,7 +717,7 @@ object primitives {
       val out_atany = Output(SInt((bw+1).W))
     })
     val scale_f = BigDecimal(2).pow(fbits)
-    val one = (BigDecimal(1.0) * scale_f).toBigInt.asSInt((bw+1).W)
+    val one = hpmath.round(BigDecimal(1.0) * scale_f).asSInt((bw+1).W)
     val zero = 0.S((bw+1).W)
 
     val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
@@ -596,7 +745,7 @@ object primitives {
       val out_expz = Output(SInt((bw+1).W))
     })
     val scale_f = BigDecimal(2).pow(fbits)
-    val Kprime_inv = ((1.207497067763 * scale_f).toBigInt).asSInt((bw+1).W)
+    val Kprime_inv = hpmath.round(hpmath.hyper_gain_inv(iters) * scale_f).asSInt((bw+1).W)
 
     val ucordic = Module(new ucordic(bw, fbits, iters, latency)).io
 
