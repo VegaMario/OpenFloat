@@ -159,8 +159,44 @@ module_b.in_a      := module_a.out_s
 
 - **Scala**: 2.13.12
 - **SBT**: 1.7.2 or later
+- **JDK**: 17 (Scala 2.13.12 and SBT 1.7.2 predate newer JDKs)
 - **Chisel**: 6.0.0 (managed by SBT)
-- **Verilator**: For simulation (optional)
+- **Verilator**: **5.048 or older** — required by the test suite, see below
+
+#### Verilator version ceiling
+
+The test suite drives Verilator through chiseltest 6.0.0, which **does not work with
+Verilator 5.050 or newer**. Verilator 5.050 removed two things chiseltest's generated
+C++ harness depends on:
+
+1. The `using WData = EData` alias, which the harness declares as `WData* data`. This
+   surfaces as `error: unknown type name 'WData'`.
+2. `VlWide`'s implicit `operator WDataOutP()`. Top-level ports wider than 64 bits are
+   `VlWide<N>`, so the harness's `data = dut->io_out_cos` no longer compiles. This one
+   cannot be worked around with compiler flags, and affects `CordicCoreSpec`
+   (`ucordic` / `cordic` / `cos` have 65-bit ports).
+
+chiseltest 6.0.0 has no version branching for either, and its only version gate is
+`majorVersion >= 4`, so it will happily try — and fail — on a newer Verilator. The
+failure is reported as a generic `verilator command failed`; the real error is in the
+`make` output, and the tell is a missing `test_run_dir/*/verilated/*-harness.o`.
+
+Homebrew has no versioned Verilator formula, so on macOS build 5.048 from source:
+
+```bash
+brew install autoconf automake help2man
+git clone https://github.com/verilator/verilator.git && cd verilator
+git checkout v5.048
+autoconf && ./configure --prefix="$HOME/.local/verilator-5.048"
+make -j"$(sysctl -n hw.ncpu)" && make install
+```
+
+Then put it ahead of any other Verilator on `PATH` — chiseltest resolves the binary with
+`which verilator`:
+
+```bash
+export PATH="$HOME/.local/verilator-5.048/bin:$PATH"
+```
 
 ### Generating Verilog
 

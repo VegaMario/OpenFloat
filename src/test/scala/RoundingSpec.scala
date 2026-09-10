@@ -60,7 +60,7 @@ class RoundingSpec extends AnyFlatSpec with ChiselScalatestTester {
   it should "match correctly-rounded double addition" in {
     val rnd = new Random(1)
     val n = 20000
-    test(new FP_add(FP64, 7)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_add(FP64, 7)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
       val as = Array.fill(n)(rnd.nextDouble() * math.pow(2, rnd.nextInt(40) - 20) * (if (rnd.nextBoolean()) 1 else -1))
@@ -87,7 +87,7 @@ class RoundingSpec extends AnyFlatSpec with ChiselScalatestTester {
   it should "match correctly-rounded double multiplication" in {
     val rnd = new Random(2)
     val n = 20000
-    test(new FP_mult(FP64, 7)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_mult(FP64, 7)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
       val as = Array.fill(n)(rnd.nextDouble() * math.pow(2, rnd.nextInt(20) - 10) * (if (rnd.nextBoolean()) 1 else -1))

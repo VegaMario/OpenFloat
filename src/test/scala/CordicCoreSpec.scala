@@ -16,7 +16,7 @@ class CordicCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
     val scale = BigDecimal(2).pow(fbits)
     val Kinv = (Primitives.primitives.hpmath.circ_gain_inv(n) * scale).setScale(0, BigDecimal.RoundingMode.HALF_UP).toBigInt
     val angles = Seq(0.0, 0.3, 0.7, 1.0)
-    test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new ucordic(bw, fbits, n, n)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.ctrl_vectoring.poke(false.B)
       c.io.ctrl_mode.poke(1.S)
@@ -48,7 +48,7 @@ class CordicCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
     val n = 60
     val scale = BigDecimal(2).pow(fbits)
     val angles = Seq(0.0, 0.3, -0.3, 0.7, -0.7, 1.0, -1.0, 1.5, -1.5)
-    test(new cordic(bw, false, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new cordic(bw, false, fbits, n, n)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       for (a <- angles) {
         c.io.in_valid.poke(true.B)
@@ -75,7 +75,7 @@ class CordicCoreSpec extends AnyFlatSpec with ChiselScalatestTester {
     val n = 60
     val scale = BigDecimal(2).pow(fbits)
     val angles = Seq(0.0, 0.3, 0.7, 1.0, 1.5)
-    test(new cos(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new cos(bw, fbits, n, n)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       for (a <- angles) {
         c.io.in_valid.poke(true.B)

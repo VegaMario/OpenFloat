@@ -40,7 +40,7 @@ class TranscendentalSpec extends AnyFlatSpec with ChiselScalatestTester {
     val iters = fmt.mantissa + 8
     val rnd = new Random(7)
     val n = 2000
-    test(new FP_cos(fmt, iters)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_cos(fmt, iters)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
       val angles = Array.fill(n)((rnd.nextDouble() * 2 - 1) * math.Pi) // [-pi, pi]
@@ -76,7 +76,7 @@ class TranscendentalSpec extends AnyFlatSpec with ChiselScalatestTester {
     val iters = fmt.mantissa + 4
     val rnd = new Random(8)
     val n = 2000
-    test(new FP_atan(fmt, iters)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_atan(fmt, iters)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
       val xs = Array.fill(n)((rnd.nextDouble() * 2 - 1) * 4.0) // [-4, 4]
@@ -101,7 +101,7 @@ class TranscendentalSpec extends AnyFlatSpec with ChiselScalatestTester {
     val fmt: FloatingPointFormat = FP32
     val rnd = new Random(9)
     val n = 2000
-    test(new FP_exp(fmt)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_exp(fmt)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
       val xs = Array.fill(n)((rnd.nextDouble() * 2 - 1) * 5.0) // [-5, 5]

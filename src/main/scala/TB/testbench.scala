@@ -36,7 +36,7 @@ object testbench extends App {
     it should "do something" in {
       // simple test to see output of multiplier module
       // since fst is enabled, look for a test_run_dir directory to be created, it will have fst files when run
-      test(new FP_add(fmt,7)).withAnnotations(Seq(VerilatorBackendAnnotation, WriteFstAnnotation)) {c=>
+      test(new FP_add(fmt,7)).withAnnotations(SimOptions.verilator :+ WriteFstAnnotation) {c=>
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
         c.io.in_a.poke(convert_string_to_IEEE_754("12.2", fmt))
@@ -62,7 +62,7 @@ object testbench extends App {
       var cnt_out = 0
       var clk = 0
 
-      test(new FP_div(fmt, fmt.mantissa, fmt.mantissa)).withAnnotations(Seq(VerilatorBackendAnnotation)) {c=>
+      test(new FP_div(fmt, fmt.mantissa, fmt.mantissa)).withAnnotations(SimOptions.verilator) {c=>
         c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -108,7 +108,7 @@ object testbench extends App {
       val rnd = new Random(4)
       val n = 20000
       val lat = 52
-      test(new FP_sqrt(FP64, 52, lat)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+      test(new FP_sqrt(FP64, 52, lat)).withAnnotations(SimOptions.verilator) { c =>
         // c.clock.setTimeout(0)
         c.io.out_ready.poke(true.B)
         c.io.in_valid.poke(true.B)
@@ -159,7 +159,7 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new cos(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+      test(new cos(bw, fbits, n, n)).withAnnotations(SimOptions.verilator){c=>
         c.io.out_ready.poke(true.B)
         while(in_cnt < total_in){
           c.io.in_valid.poke(true.B)
@@ -233,7 +233,7 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new ucordic(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+      test(new ucordic(bw, fbits, n, n)).withAnnotations(SimOptions.verilator){c=>
         c.io.out_ready.poke(true.B)
         c.io.ctrl_vectoring.poke(false.B)
         c.io.ctrl_mode.poke(0.S)
@@ -304,7 +304,7 @@ object testbench extends App {
       var out_cnt = 0
       var clk = 0
 
-      test(new exp(bw, fbits, n, n)).withAnnotations(Seq(VerilatorBackendAnnotation)){c=>
+      test(new exp(bw, fbits, n, n)).withAnnotations(SimOptions.verilator){c=>
         c.io.out_ready.poke(true.B)
 //        c.io.ctrl_vectoring.poke(false.B)
 //        c.io.ctrl_mode.poke(-1.S)

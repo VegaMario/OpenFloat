@@ -50,7 +50,7 @@ class DivSqrtSpec extends AnyFlatSpec with ChiselScalatestTester {
     val rnd = new Random(3)
     val n = 20000
     val lat = 64
-    test(new FP_div(FP64, 52, lat)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_div(FP64, 52, lat)).withAnnotations(SimOptions.verilator) { c =>
       c.clock.setTimeout(0)
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)
@@ -73,7 +73,7 @@ class DivSqrtSpec extends AnyFlatSpec with ChiselScalatestTester {
     val rnd = new Random(4)
     val n = 20000
     val lat = 52
-    test(new FP_sqrt(FP64, 52, lat)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_sqrt(FP64, 52, lat)).withAnnotations(SimOptions.verilator) { c =>
       c.clock.setTimeout(0)
       c.io.out_ready.poke(true.B)
       c.io.in_valid.poke(true.B)

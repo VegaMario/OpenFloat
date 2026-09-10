@@ -66,7 +66,7 @@ class FP_accSpec extends AnyFlatSpec with ChiselScalatestTester {
       convert_IEEE754_to_Decimal(roundToFormat(BigDecimal(signed), fmt), fmt)
     }
 
-    test(new FP_acc(fmt, maxExp = maxE, minExp = minE, iters = iters)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_acc(fmt, maxExp = maxE, minExp = minE, iters = iters)).withAnnotations(SimOptions.verilator) { c =>
       val obs = runBatches(c, fmt, allVals, iters)
       assert(obs.length == batches, s"expected $batches results, got ${obs.length}")
 
@@ -99,7 +99,7 @@ class FP_accSpec extends AnyFlatSpec with ChiselScalatestTester {
       convert_IEEE754_to_Decimal(roundToFormat(BigDecimal(mag), fmt), fmt)
     }
 
-    test(new FP_acc(fmt, maxExp = maxE, minExp = minE, iters = iters)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_acc(fmt, maxExp = maxE, minExp = minE, iters = iters)).withAnnotations(SimOptions.verilator) { c =>
       val obs = runBatches(c, fmt, vals, iters)
       assert(obs.length == 1)
       val exactSum = vals.foldLeft(BigDecimal(0))(_ + _)
@@ -114,7 +114,7 @@ class FP_accSpec extends AnyFlatSpec with ChiselScalatestTester {
   it should "discard the running sum on clear" in {
     val fmt: FloatingPointFormat = FP32
     val iters = 8
-    test(new FP_acc(fmt, maxExp = 4, minExp = -4, iters = iters)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+    test(new FP_acc(fmt, maxExp = 4, minExp = -4, iters = iters)).withAnnotations(SimOptions.verilator) { c =>
       c.io.out_ready.poke(true.B)
       c.io.in_last.poke(false.B)
       // Push a couple of terms, then clear, then push iters terms of 1.0 and flush.
